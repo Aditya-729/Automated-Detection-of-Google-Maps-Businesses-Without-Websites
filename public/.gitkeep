@@ -1,0 +1,10 @@
+# PUBLIC FOLDER
+# 
+# This folder contains static assets that are served directly.
+# Files here are accessible at the root URL.
+# 
+# Example:
+# - public/logo.png → accessible at /logo.png
+# - public/images/photo.jpg → accessible at /images/photo.jpg
+# 
+# Use this for: images, icons, fonts, robots.txt, favicon, etc.
