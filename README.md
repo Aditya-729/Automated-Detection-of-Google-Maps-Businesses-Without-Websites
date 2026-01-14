@@ -28,6 +28,11 @@ npm install
 
 ### 3. Set Up Environment Variables
 
+**Quick Setup:**
+1. Copy the example file: `cp .env.example .env.local` (or copy `.env.example` and rename to `.env.local`)
+2. Open `.env.local` and replace the placeholders with your actual API keys
+
+**Manual Setup:**
 Create a `.env.local` file in the root directory and add your API keys:
 
 ```bash
@@ -45,11 +50,13 @@ NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
 ```
 
-Get your API keys from:
+**Get your API keys from:**
 - Gemini API: https://makersuite.google.com/app/apikey
 - Google Maps API: https://console.cloud.google.com/google/maps-apis
 - Mino API: https://mino.ai (for browser automation and website checking)
 - Supabase: Your project dashboard (Settings → API)
+
+**⚠️ Important:** The `.env.local` file is gitignored and will NOT be committed to GitHub. Your API keys stay secure!
 
 ### 4. Run the Development Server
 
