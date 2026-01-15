@@ -564,24 +564,29 @@ Only return the JSON object, no additional text or explanation.
       );
     }
 
-    // Get Google Maps API key from environment variables
+    // Google Maps API key (optional)
+    // NOTE: If you do NOT want to use Google Maps / Google Places, simply do not set this variable.
+    // The app will still work, but it will return 0 businesses because it can't do the business search step.
     const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY;
 
-    if (!googleMapsApiKey) {
-      console.error("GOOGLE_MAPS_API_KEY is not set in environment variables");
-      return NextResponse.json(
-        { error: "Google Maps API key not configured" },
-        { status: 500 }
+    // Search for businesses using Google Places API (only if Google Maps key is provided)
+    // We'll search for each business type in the location
+    let businesses: BusinessResult[] = [];
+    let originalCount = 0;
+
+    if (googleMapsApiKey) {
+      businesses = await searchBusinesses(
+        extractedData.businessTypes,
+        extractedData.location,
+        googleMapsApiKey
+      );
+      originalCount = businesses.length;
+    } else {
+      // No key provided: skip business search (minimal behavior change, avoids crashing)
+      console.warn(
+        "GOOGLE_MAPS_API_KEY is not set. Skipping Google Places search and returning 0 businesses."
       );
     }
-
-    // Search for businesses using Google Places API
-    // We'll search for each business type in the location
-    let businesses = await searchBusinesses(
-      extractedData.businessTypes,
-      extractedData.location,
-      googleMapsApiKey
-    );
 
     /**
      * PROTECTION: Limit Maximum Businesses Processed
@@ -602,7 +607,7 @@ Only return the JSON object, no additional text or explanation.
      * - MAX_BUSINESSES_LIMIT = 20
      * - We process first 20, log warning, return 20 results
      */
-    const originalCount = businesses.length;
+    // Only apply limiting logic if we actually have businesses
     if (businesses.length > MAX_BUSINESSES_LIMIT) {
       console.warn(
         `Business limit exceeded: Found ${businesses.length} businesses, limiting to ${MAX_BUSINESSES_LIMIT}`

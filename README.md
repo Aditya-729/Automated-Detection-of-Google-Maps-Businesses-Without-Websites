@@ -39,7 +39,9 @@ Create a `.env.local` file in the root directory and add your API keys:
 # Gemini AI API
 GEMINI_API_KEY=your_gemini_api_key_here
 
-# Google Maps API
+# Google Maps API (optional)
+# Only needed if you want the app to search businesses via Google Places.
+# If you don't set this, the app will return 0 businesses (but it will still run).
 GOOGLE_MAPS_API_KEY=your_google_maps_api_key_here
 
 # Mino API (for website checking)

@@ -22,12 +22,12 @@ GEMINI_API_KEY=your_gemini_api_key_here
 - **Why needed**: Extracts business types and location from user prompts
 - **Server-only**: Only used in API routes (not exposed to browser)
 
-### 2. Google Maps API Key
+### 2. Google Maps API Key (optional)
 ```
 GOOGLE_MAPS_API_KEY=your_google_maps_api_key_here
 ```
 - **Where to get it**: https://console.cloud.google.com/google/maps-apis
-- **Why needed**: Searches for businesses using Google Places API
+- **Why needed**: Searches for businesses using Google Places API (only if you want business search)
 - **Server-only**: Only used in API routes (not exposed to browser)
 
 ### 3. Mino API Key

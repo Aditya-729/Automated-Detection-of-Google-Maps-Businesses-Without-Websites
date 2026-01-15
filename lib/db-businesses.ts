@@ -59,6 +59,15 @@ export async function getBusinessFromCache(
 ): Promise<BusinessRecord | null> {
   try {
     /**
+     * PROTECTION (serverless-safe):
+     * If Supabase is not configured (missing env vars), caching is disabled.
+     * We return null so the app can keep working without a database.
+     */
+    if (!supabase) {
+      return null;
+    }
+
+    /**
      * Supabase Query Explanation:
      * 
      * supabase.from("businesses")
@@ -119,6 +128,14 @@ export async function insertBusiness(
 ): Promise<void> {
   try {
     /**
+     * PROTECTION:
+     * If Supabase is not configured, skip caching instead of crashing.
+     */
+    if (!supabase) {
+      return;
+    }
+
+    /**
      * Supabase Insert Explanation:
      * 
      * supabase.from("businesses")
@@ -160,6 +177,14 @@ export async function updateBusiness(
   updates: Partial<BusinessRecord>
 ): Promise<void> {
   try {
+    /**
+     * PROTECTION:
+     * If Supabase is not configured, skip caching instead of crashing.
+     */
+    if (!supabase) {
+      return;
+    }
+
     /**
      * Supabase Update Explanation:
      * 
@@ -248,6 +273,14 @@ export function isDataFresh(
  */
 export async function upsertBusiness(business: BusinessRecord): Promise<void> {
   try {
+    /**
+     * PROTECTION:
+     * If Supabase is not configured, skip caching instead of crashing.
+     */
+    if (!supabase) {
+      return;
+    }
+
     // Check if business already exists
     const existing = await getBusinessFromCache(business.place_id);
 

@@ -32,29 +32,24 @@ const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
 /**
  * VERCEL DEPLOYMENT NOTE:
- * 
+ *
  * On Vercel, environment variables are set in the Vercel dashboard.
- * They are NOT read from .env.local files in production.
- * 
- * What to do:
+ * They are NOT read from `.env.local` files in production.
+ *
+ * IMPORTANT CHANGE (minimal, for safer deployments):
+ * - We do NOT throw an error at import-time anymore.
+ * - If Supabase env vars are missing, we simply disable caching.
+ *
+ * Why this protection exists:
+ * - Throwing here can crash your whole API route on Vercel if you forgot to set vars.
+ * - Disabling caching is safer than crashing the app.
+ *
+ * What to do (if you want caching enabled):
  * 1. Go to your Vercel project dashboard
- * 2. Go to Settings → Environment Variables
+ * 2. Settings → Environment Variables
  * 3. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY
  * 4. Redeploy your app
- * 
- * Why NEXT_PUBLIC_ prefix?
- * - Variables with NEXT_PUBLIC_ are available in the browser
- * - Variables without it are only available on the server
- * - Supabase client can work in both places, so we use NEXT_PUBLIC_
  */
-// Validate that environment variables are set
-if (!supabaseUrl || !supabaseAnonKey) {
-  // On Vercel, this error will show in the build logs
-  // Make sure to set these in Vercel dashboard → Settings → Environment Variables
-  throw new Error(
-    "Missing Supabase environment variables. Please set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in your Vercel project settings (or .env.local for local development)"
-  );
-}
 
 /**
  * Create and export the Supabase client
@@ -67,4 +62,12 @@ if (!supabaseUrl || !supabaseAnonKey) {
  * 
  * Think of it as a helper that translates your JavaScript code into database commands
  */
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+/**
+ * Create the Supabase client only when env vars are present.
+ *
+ * If env vars are missing:
+ * - supabase will be null
+ * - Database caching functions will safely no-op / return null
+ */
+export const supabase =
+  supabaseUrl && supabaseAnonKey ? createClient(supabaseUrl, supabaseAnonKey) : null;

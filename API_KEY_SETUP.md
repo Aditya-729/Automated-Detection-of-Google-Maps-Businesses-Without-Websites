@@ -6,7 +6,7 @@
 **Location**: `.env.local` (in project root)
 
 **What it contains:**
-- Your Mino API key: `MINO_API_KEY=sk-mino-Cw4Q8cYocWdBYl4O61LcFdu_NBv8ylfI`
+- Your Mino API key: `MINO_API_KEY=your_mino_api_key_here`
 - Security comments explaining this is server-side only
 - Instructions for Vercel deployment
 
@@ -67,7 +67,7 @@ const minoApiKey = process.env.MINO_API_KEY;
 
 ### Vercel Deployment:
 1. Go to Vercel dashboard → Your Project → Settings → Environment Variables
-2. Add: `MINO_API_KEY` = `sk-mino-Cw4Q8cYocWdBYl4O61LcFdu_NBv8ylfI`
+2. Add: `MINO_API_KEY` = `your_mino_api_key_here`
 3. Vercel will use this value (not .env.local)
 4. Your API works on Vercel ✅
 
@@ -99,7 +99,7 @@ git status
 1. Go to https://vercel.com
 2. Open your project
 3. Go to Settings → Environment Variables
-4. Add: `MINO_API_KEY` = `sk-mino-Cw4Q8cYocWdBYl4O61LcFdu_NBv8ylfI`
+4. Add: `MINO_API_KEY` = `your_mino_api_key_here`
 5. Redeploy your app
 
 ## Summary

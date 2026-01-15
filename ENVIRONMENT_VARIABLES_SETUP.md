@@ -42,7 +42,7 @@
 ### ✅ Secure (Server-Side Only):
 - `MINO_API_KEY` - Only accessible in API routes
 - `GEMINI_API_KEY` - Only accessible in API routes
-- `GOOGLE_MAPS_API_KEY` - Only accessible in API routes
+- `GOOGLE_MAPS_API_KEY` - Only accessible in API routes (optional if you are not using Google business search)
 
 ### ✅ Safe to Expose (Browser Accessible):
 - `NEXT_PUBLIC_SUPABASE_URL` - Just a URL, not a secret
@@ -62,7 +62,7 @@ Open `.env.local` and replace these placeholders with your actual keys:
 
 ```
 GEMINI_API_KEY=<YOUR_GEMINI_KEY>          → Replace with your actual Gemini key
-GOOGLE_MAPS_API_KEY=<YOUR_GOOGLE_MAPS_KEY> → Replace with your actual Google Maps key
+GOOGLE_MAPS_API_KEY=<YOUR_GOOGLE_MAPS_KEY> → Optional. Only needed if you enable business search via Google Places.
 NEXT_PUBLIC_SUPABASE_URL=<YOUR_SUPABASE_URL> → Replace with your Supabase project URL
 NEXT_PUBLIC_SUPABASE_ANON_KEY=<YOUR_SUPABASE_ANON_KEY> → Replace with your Supabase anon key
 ```
@@ -85,12 +85,12 @@ The app should now use all your API keys from `.env.local`!
 1. Go to https://vercel.com
 2. Open your project
 3. Go to **Settings** → **Environment Variables**
-4. Add all 5 variables:
-   - `MINO_API_KEY` = `sk-mino-Cw4Q8cYocWdBYl4O61LcFdu_NBv8ylfI`
-   - `GEMINI_API_KEY` = (your Gemini key)
-   - `GOOGLE_MAPS_API_KEY` = (your Google Maps key)
-   - `NEXT_PUBLIC_SUPABASE_URL` = (your Supabase URL)
-   - `NEXT_PUBLIC_SUPABASE_ANON_KEY` = (your Supabase anon key)
+4. Add environment variables:
+   - `MINO_API_KEY` = (your Mino key - for website checking)
+   - `GEMINI_API_KEY` = (your Gemini key - for AI extraction)
+   - `GOOGLE_MAPS_API_KEY` = (optional - only if you want business search via Google Places)
+   - `NEXT_PUBLIC_SUPABASE_URL` = (your Supabase URL - for database caching)
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY` = (your Supabase anon key - for database caching)
 5. Redeploy your app
 
 ## 🔍 Verification
