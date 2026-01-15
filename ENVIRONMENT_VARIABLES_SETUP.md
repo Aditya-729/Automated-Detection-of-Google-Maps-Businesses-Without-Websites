@@ -7,11 +7,11 @@
 **Location**: `.env.local` (in project root)
 
 **Contains all 5 environment variables:**
-1. `MINO_API_KEY` - Your Mino API key (already added)
-2. `GEMINI_API_KEY` - Placeholder for your Gemini key
-3. `GOOGLE_MAPS_API_KEY` - Placeholder for your Google Maps key
-4. `NEXT_PUBLIC_SUPABASE_URL` - Placeholder for your Supabase URL
-5. `NEXT_PUBLIC_SUPABASE_ANON_KEY` - Placeholder for your Supabase anon key
+1. `MINO_API_KEY` - your_mino_api_key_here (DO NOT paste real keys into docs)
+2. `GEMINI_API_KEY` - your_gemini_api_key_here (DO NOT paste real keys into docs)
+3. `GOOGLE_MAPS_API_KEY` - your_google_maps_api_key_here (optional if you are not using Google business search)
+4. `NEXT_PUBLIC_SUPABASE_URL` - your_supabase_project_url_here
+5. `NEXT_PUBLIC_SUPABASE_ANON_KEY` - your_supabase_anon_key_here
 
 **Important Notes:**
 - ✅ File is properly gitignored (won't be committed to GitHub)
