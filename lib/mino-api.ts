@@ -40,7 +40,7 @@ export async function checkBusinessWebsite(
   googleMapsUrl: string,
   apiKey: string,
   timeoutMs: number = 15000
-): Promise<boolean> {
+): Promise<boolean | null> {
   /**
    * PROTECTION: Timeout for Mino API Calls
    * 
@@ -102,9 +102,6 @@ export async function checkBusinessWebsite(
       signal: controller.signal, // Enable timeout cancellation
     });
 
-    // Clear timeout since request completed
-    clearTimeout(timeoutId);
-
     /**
      * PROTECTION: Handle Mino API HTTP Errors Gracefully
      * 
@@ -121,27 +118,53 @@ export async function checkBusinessWebsite(
      */
     if (!response.ok) {
       const errorText = await response.text().catch(() => "");
+      // Clear timeout since request completed
+      clearTimeout(timeoutId);
       console.error(
         `Mino API error: ${response.status} ${response.statusText}`,
         errorText
       );
-      return false; // Default to false on error
+      return null; // Unknown on error
     }
 
     let data;
     try {
-      data = await response.json();
-    } catch (parseError) {
-      /**
-       * PROTECTION: Handle JSON Parse Errors
-       * 
-       * WHY THIS PROTECTION EXISTS:
-       * - API might return non-JSON response
-       * - Network issues might corrupt the response
-       * - We don't want parse errors to crash the request
-       */
-      console.error("Failed to parse Mino API response:", parseError);
-      return false;
+      const rawText = await response.text();
+      try {
+        data = JSON.parse(rawText);
+      } catch (parseError) {
+        /**
+         * PROTECTION: Handle JSON Parse Errors (SSE-safe)
+         *
+         * WHY THIS PROTECTION EXISTS:
+         * - Mino may return Server-Sent Events (lines starting with "data:")
+         * - We extract the last JSON payload if present
+         */
+        const lastDataLine = rawText
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line.startsWith("data:"))
+          .pop();
+
+        if (lastDataLine) {
+          const payload = lastDataLine.replace(/^data:\s*/, "");
+          try {
+            data = JSON.parse(payload);
+          } catch (sseParseError) {
+            console.error(
+              "Failed to parse Mino SSE JSON payload:",
+              sseParseError
+            );
+            return null;
+          }
+        } else {
+          console.error("Failed to parse Mino API response:", parseError);
+          return null;
+        }
+      }
+    } finally {
+      // Clear timeout after body is fully processed
+      clearTimeout(timeoutId);
     }
 
     /**
@@ -159,9 +182,9 @@ export async function checkBusinessWebsite(
       return hasWebsite;
     }
 
-    // If response format is unexpected, default to false
+    // If response format is unexpected, return unknown
     console.warn("Unexpected response format from Mino API:", data);
-    return false;
+    return null;
   } catch (error) {
     // Clear timeout in case of error
     clearTimeout(timeoutId);
@@ -195,7 +218,7 @@ export async function checkBusinessWebsite(
       // Other errors (network, etc.)
       console.error("Error checking website with Mino API:", error);
     }
-    return false; // Default to false on error/timeout
+    return null; // Unknown on error/timeout
   }
 }
 
@@ -225,7 +248,7 @@ export async function checkBusinessesWebsitesParallel(
   businesses: Array<{ place_id: string; googleMapsUrl: string }>,
   apiKey: string,
   timeoutMs: number = 15000
-): Promise<Map<string, boolean>> {
+): Promise<Map<string, boolean | null>> {
   /**
    * PROTECTION: Use Promise.allSettled() for Error Resilience
    * 
@@ -273,7 +296,7 @@ export async function checkBusinessesWebsitesParallel(
       return {
         status: "rejected" as const,
         place_id: business.place_id,
-        has_website: false, // Default to false on error
+        has_website: null, // Unknown on error
       };
     }
   });
@@ -294,7 +317,7 @@ export async function checkBusinessesWebsitesParallel(
    * 
    * We handle both cases gracefully
    */
-  const websiteMap = new Map<string, boolean>();
+  const websiteMap = new Map<string, boolean | null>();
   for (const result of results) {
     if (result.status === "fulfilled") {
       // Check succeeded, use the result
@@ -326,9 +349,26 @@ export async function checkBusinessesWebsitesParallel(
  * Google Maps URLs follow this format:
  * https://www.google.com/maps/place/?q=place_id:PLACE_ID
  * 
- * @param placeId - The Google Places place_id
+ * @param placeId - The Google place_id (if you have it)
  * @returns Google Maps URL for the business
  */
 export function buildGoogleMapsUrl(placeId: string): string {
   return `https://www.google.com/maps/place/?q=place_id:${placeId}`;
+}
+
+/**
+ * Build a Google Maps search URL from a name + address
+ *
+ * WHY THIS EXISTS:
+ * - OpenStreetMap results don't include Google place_id
+ * - Mino can still use a Google Maps search URL to find the business
+ * - This works without a Google Maps API key
+ *
+ * @param name - Business name
+ * @param address - Business address
+ * @returns Google Maps search URL
+ */
+export function buildGoogleMapsSearchUrl(name: string, address: string): string {
+  const query = encodeURIComponent(`${name} ${address}`);
+  return `https://www.google.com/maps/search/?api=1&query=${query}`;
 }

@@ -11,7 +11,7 @@
  * 
  * 2. COLUMNS (Fields): The different types of data stored
  *    - name: Business name (text)
- *    - place_id: Unique ID from Google Places (text, used as identifier)
+ *    - place_id: Unique ID from the business source (text, used as identifier)
  *    - has_website: Whether business has a website (true/false)
  *    - last_checked_at: When we last checked this business (date/time)
  * 
@@ -20,7 +20,7 @@
  *    - Example row: { name: "Starbucks", place_id: "ChIJ...", has_website: true, ... }
  * 
  * 4. CACHE: Storing data we've already fetched
- *    - Instead of calling Google Places API every time, we check the database first
+ *    - Instead of calling external business search every time, we check the database first
  *    - If we have recent data, we use it (saves time and API costs)
  *    - If data is old or missing, we fetch fresh data from the API
  */
@@ -47,11 +47,11 @@ export interface BusinessRecord {
  * 2. Returns the business record if found, or null if not found
  * 
  * Why check the database first?
- * - Saves API calls (Google Places API costs money per request)
+ * - Saves API calls (business search APIs can cost money per request)
  * - Faster responses (database is quicker than external API)
  * - Reduces rate limiting issues
  * 
- * @param placeId - The unique place_id from Google Places API
+ * @param placeId - The unique place_id from the business source
  * @returns Business record if found, null if not in database
  */
 export async function getBusinessFromCache(

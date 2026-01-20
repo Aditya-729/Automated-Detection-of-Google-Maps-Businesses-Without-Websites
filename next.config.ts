@@ -1,24 +1,14 @@
 import type { NextConfig } from "next";
 
 /**
- * VERCEL DEPLOYMENT CONFIGURATION
- * 
- * This file configures Next.js for deployment on Vercel.
- * 
- * What is Vercel?
- * - Vercel is a hosting platform that runs your Next.js app
- * - It automatically builds and deploys your app when you push code
- * - It runs your app on "serverless functions" (functions that run on-demand)
- * 
- * Why these settings?
- * - runtime: 'nodejs' - Tells Vercel to use Node.js runtime (required for our APIs)
- * - This ensures our API routes work correctly on Vercel
+ * Next.js configuration
+ *
+ * Note (fix for dev/build error):
+ * - The `runtime` key is NOT supported in `next.config.ts`
+ * - It caused a warning: "Invalid next.config.ts options detected"
+ * - Removing it keeps the app working on Vercel (no behavior change)
+ * - Vercel already uses the correct runtime automatically
  */
-const nextConfig: NextConfig = {
-  // Use Node.js runtime for API routes
-  // This is required for Vercel serverless functions
-  // Without this, API routes might not work correctly
-  runtime: "nodejs",
-};
+const nextConfig: NextConfig = {};
 
 export default nextConfig;

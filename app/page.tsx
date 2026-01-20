@@ -10,7 +10,8 @@
  */
 "use client";
 
-import { useState } from "react";
+import dynamic from "next/dynamic";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 /**
  * Type definitions for API response
@@ -21,134 +22,400 @@ import { useState } from "react";
 interface BusinessWithoutWebsite {
   name: string;
   address: string;
+  place_id: string;
+  lat: number | null;
+  lon: number | null;
+  has_website?: boolean | null;
+  website_status?: "no_website" | "unknown";
 }
 
-interface ApiResponse {
-  success: boolean;
-  summary: {
-    totalBusinesses: number;
-    countWithoutWebsite: number;
+interface StreamMetadata {
+  businessTypes: string[];
+  location: string | null;
+  radiusKm: number;
+  tileCount: number;
+  center: {
+    lat: number;
+    lon: number;
   };
-  businessesWithoutWebsite: BusinessWithoutWebsite[];
-  allBusinesses: Array<{
-    name: string;
-    address: string;
-    place_id: string;
-    has_website: boolean | null;
-  }>;
-  metadata: {
-    businessTypes: string[];
-    location: string | null;
-    originalPrompt: string;
-    timestamp: string;
+  mockUsed?: boolean;
+  geminiErrorMessage?: string | null;
+  minoEnabled?: boolean;
+}
+
+interface StreamProgress {
+  tilesSearched: number;
+  totalTiles: number;
+  businessesFound: number;
+  uniqueBusinesses: number;
+}
+
+interface TileBounds {
+  id: string;
+  bounds: {
+    west: number;
+    east: number;
+    north: number;
+    south: number;
   };
+}
+
+const MapView = dynamic(() => import("./components/MapView"), {
+  ssr: false,
+});
+
+interface ToastMessage {
+  id: string;
+  text: string;
 }
 
 export default function Home() {
-  // State to store the user's prompt input
+  const quickPrompts = [
+    "Find restaurants in New York without websites",
+    "List coffee shops in Los Angeles without websites",
+    "Show grocery stores in Chicago without websites",
+    "Find salons in Houston without websites",
+    "List gyms in Phoenix without websites",
+  ];
+
   const [prompt, setPrompt] = useState("");
-  
-  // State to store the API response data
-  // null = no data yet, ApiResponse = successful response, string = error message
-  const [data, setData] = useState<ApiResponse | null>(null);
+  const [radiusKm, setRadiusKm] = useState(50);
+  const [businesses, setBusinesses] = useState<BusinessWithoutWebsite[]>([]);
+  const [metadata, setMetadata] = useState<StreamMetadata | null>(null);
+  const [progress, setProgress] = useState<StreamProgress | null>(null);
+  const [tiles, setTiles] = useState<TileBounds[]>([]);
   const [error, setError] = useState<string | null>(null);
-  
-  // State to track loading state (shows when request is in progress)
-  const [isLoading, setIsLoading] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
+  const RESULTS_PAGE_SIZE = 100;
+  const [visibleCount, setVisibleCount] = useState(RESULTS_PAGE_SIZE);
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [nowTick, setNowTick] = useState(0);
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [geminiCheckStatus, setGeminiCheckStatus] = useState<string | null>(null);
+  const [isCheckingGemini, setIsCheckingGemini] = useState(false);
+  const streamControllerRef = useRef<AbortController | null>(null);
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const target = loadMoreRef.current;
+    if (!target) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisibleCount((current) => current + RESULTS_PAGE_SIZE);
+        }
+      },
+      { rootMargin: "200px" }
+    );
+
+    observer.observe(target);
+
+    return () => observer.disconnect();
+  }, [RESULTS_PAGE_SIZE]);
+
+  useEffect(() => {
+    if (!isStreaming) {
+      return;
+    }
+    const interval = setInterval(() => {
+      setNowTick(Date.now());
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isStreaming]);
 
   /**
-   * Handler function that runs when the "Run" button is clicked
-   * 
-   * UI LOGIC FLOW:
-   * 1. Set loading state → Shows "Running..." and disables button
-   * 2. Clear previous data and errors → Clean slate for new results
-   * 3. Send API request → POST to /api/run with user prompt
-   * 4. Handle response:
-   *    - Success → Parse JSON and update data state
-   *    - Error → Update error state with message
-   * 5. Always clear loading state → Re-enable button
-   * 
-   * ERROR HANDLING:
-   * - Network errors (no internet, server down)
-   * - HTTP errors (400, 500, etc.)
-   * - JSON parsing errors (malformed response)
-   * - All errors are caught and displayed to user
+   * Handler for streaming results from the backend.
+   * - Sends the prompt + radius
+   * - Parses SSE events and updates the UI incrementally
+   * - Shows errors without blocking partial results
    */
   const handleRun = async () => {
-    // STEP 1: Set loading state
-    // This shows "Running..." text and disables the button
-    setIsLoading(true);
-    
-    // STEP 2: Clear previous results and errors
-    // Ensures we don't show stale data from previous searches
-    setData(null);
+    streamControllerRef.current?.abort();
+    const controller = new AbortController();
+    streamControllerRef.current = controller;
+
+    setIsStreaming(true);
+    setHasSearched(true);
+    setBusinesses([]);
+    setMetadata(null);
+    setProgress(null);
+    setTiles([]);
     setError(null);
+    setVisibleCount(RESULTS_PAGE_SIZE);
+    setStartTime(Date.now());
+    setNowTick(Date.now());
+    setToasts([]);
 
     try {
-      // STEP 3: Send POST request to the API route
-      // fetch() is the browser's built-in function for HTTP requests
       const response = await fetch("/api/run", {
-        method: "POST", // HTTP method
+        method: "POST",
         headers: {
-          "Content-Type": "application/json", // Tell server we're sending JSON
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
         },
-        body: JSON.stringify({ prompt }), // Convert prompt to JSON string
+        body: JSON.stringify({ prompt, radiusKm }),
+        signal: controller.signal,
       });
 
-      // STEP 4a: Check if the request was successful (status 200-299)
-      // If not successful, throw an error with status code
       if (!response.ok) {
-        // Try to get error message from response
         const errorData = await response.json().catch(() => ({}));
         throw new Error(
-          errorData.error || errorData.message || `Request failed: ${response.status}`
+          errorData.error ||
+            errorData.message ||
+            `Request failed: ${response.status}`
         );
       }
 
-      // STEP 4b: Parse the JSON response from the server
-      // The response should match our ApiResponse type
-      const responseData: ApiResponse = await response.json();
-
-      // Validate response structure
-      if (!responseData.success || !responseData.summary) {
-        throw new Error("Invalid response format from server");
+      const contentType = response.headers.get("content-type") || "";
+      if (!contentType.includes("text/event-stream")) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(
+          errorData.error ||
+            errorData.message ||
+            "Streaming response not supported by server."
+        );
       }
 
-      // STEP 5: Update data state with successful response
-      // This triggers a re-render and displays the results
-      setData(responseData);
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("Streaming is not supported in this browser.");
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        let boundaryIndex = buffer.indexOf("\n\n");
+
+        while (boundaryIndex !== -1) {
+          const rawEvent = buffer.slice(0, boundaryIndex).trim();
+          buffer = buffer.slice(boundaryIndex + 2);
+          boundaryIndex = buffer.indexOf("\n\n");
+
+          if (!rawEvent) {
+            continue;
+          }
+
+          let eventType = "message";
+          let dataPayload = "";
+
+          for (const line of rawEvent.split("\n")) {
+            if (line.startsWith("event:")) {
+              eventType = line.replace("event:", "").trim();
+            }
+            if (line.startsWith("data:")) {
+              dataPayload += line.replace("data:", "").trim();
+            }
+          }
+
+          if (!dataPayload) {
+            continue;
+          }
+
+          const parsed = JSON.parse(dataPayload);
+
+          if (eventType === "metadata") {
+            setMetadata(parsed);
+          }
+
+          if (eventType === "progress") {
+            setProgress(parsed);
+          }
+
+          if (eventType === "business") {
+            setBusinesses((current) => [...current, parsed]);
+            const toastId = `${parsed.place_id}-${Date.now()}`;
+            setToasts((current) => [
+              { id: toastId, text: `Found: ${parsed.name}` },
+              ...current,
+            ].slice(0, 5));
+            setTimeout(() => {
+              setToasts((current) =>
+                current.filter((toast) => toast.id !== toastId)
+              );
+            }, 5000);
+          }
+
+          if (eventType === "tile") {
+            setTiles((current) => {
+              if (current.some((tile) => tile.id === parsed.id)) {
+                return current;
+              }
+              return [...current, parsed];
+            });
+          }
+
+          if (eventType === "done") {
+            setProgress((current) => ({
+              tilesSearched: parsed.tilesSearched ?? current?.tilesSearched ?? 0,
+              totalTiles: parsed.totalTiles ?? current?.totalTiles ?? 0,
+              businessesFound: parsed.totalFound ?? current?.businessesFound ?? 0,
+              uniqueBusinesses:
+                parsed.uniqueBusinesses ?? current?.uniqueBusinesses ?? 0,
+            }));
+          }
+
+          if (eventType === "error") {
+            throw new Error(parsed.message || "Streaming error");
+          }
+        }
+      }
     } catch (error) {
-      // ERROR HANDLING: Catch any errors and display to user
-      // Types of errors:
-      // - NetworkError: No internet, server unreachable
-      // - HTTPError: Server returned error status (400, 500, etc.)
-      // - ParseError: Response is not valid JSON
-      // - ValidationError: Response doesn't match expected structure
-      
       console.error("Error:", error);
-      
-      // Extract error message
       const errorMessage =
         error instanceof Error
           ? error.message
           : "Unknown error occurred. Please try again.";
-
-      // Update error state to display error message in UI
       setError(errorMessage);
     } finally {
-      // STEP 6: Always clear loading state when done
-      // This runs whether request succeeded or failed
-      // Re-enables the button and hides loading indicator
-      setIsLoading(false);
+      setIsStreaming(false);
     }
   };
 
+  const handleGeminiCheck = async () => {
+    setIsCheckingGemini(true);
+    setGeminiCheckStatus(null);
+    try {
+      const response = await fetch("/api/gemini-check");
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.ok) {
+        const message =
+          data?.error || `Gemini check failed (${response.status})`;
+        setGeminiCheckStatus(message);
+        return;
+      }
+      setGeminiCheckStatus("Gemini check OK");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Gemini check failed";
+      setGeminiCheckStatus(message);
+    } finally {
+      setIsCheckingGemini(false);
+    }
+  };
+
+  const mapCenter = useMemo(
+    () => metadata?.center ?? null,
+    [metadata]
+  );
+
+  const elapsedSeconds = useMemo(() => {
+    if (!startTime) {
+      return 0;
+    }
+    return Math.floor((nowTick - startTime) / 1000);
+  }, [startTime, nowTick]);
+
+  const progressPercent = useMemo(() => {
+    if (!progress || progress.totalTiles === 0) {
+      return 0;
+    }
+    return Math.min(
+      100,
+      Math.round((progress.tilesSearched / progress.totalTiles) * 100)
+    );
+  }, [progress]);
+
+  const etaSeconds = useMemo(() => {
+    if (!progress || progress.tilesSearched === 0 || !startTime) {
+      return null;
+    }
+    const elapsedMs = nowTick - startTime;
+    const avgPerTile = elapsedMs / progress.tilesSearched;
+    const remainingTiles = Math.max(
+      0,
+      progress.totalTiles - progress.tilesSearched
+    );
+    return Math.round((avgPerTile * remainingTiles) / 1000);
+  }, [progress, startTime, nowTick]);
+
+  const formatTime = (seconds: number | null) => {
+    if (seconds === null) {
+      return "--:--";
+    }
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${String(secs).padStart(2, "0")}`;
+  };
+
   return (
-    <main>
-      <h1>Business Website Checker</h1>
-      <p className="page-description">
-        Enter a prompt to find businesses and check which ones don't have websites.
-      </p>
+    <main className="app-shell">
+      <div className="bg-orb orb-one" aria-hidden="true" />
+      <div className="bg-orb orb-two" aria-hidden="true" />
+      <div className="bg-orb orb-three" aria-hidden="true" />
+      <section className="hero">
+        <h1>Website Gap Finder</h1>
+        <p className="page-description">Find local businesses missing a website.</p>
+
+        <div className="status-list">
+          <span className="status-pill">
+            {metadata
+              ? metadata.mockUsed
+                ? "Gemini: Mocked"
+                : "Gemini: Live"
+              : "Gemini: Pending"}
+          </span>
+          <span className="status-pill">OpenStreetMap: On</span>
+          <span className="status-pill">Supabase Cache: On</span>
+          <span className="status-pill">
+            Mino Check: {metadata?.minoEnabled === false ? "Off" : "On"}
+          </span>
+        </div>
+        <div className="status-list status-actions">
+          <button
+            type="button"
+            className="prompt-button action-button"
+            onClick={handleGeminiCheck}
+            disabled={isCheckingGemini}
+          >
+            {isCheckingGemini ? "Checking Gemini..." : "Check Gemini"}
+          </button>
+          {geminiCheckStatus && (
+            <span className="status-pill">{geminiCheckStatus}</span>
+          )}
+        </div>
+
+        <div className="intro-cards">
+          <div className="intro-card">
+            <h3>Prompt</h3>
+            <p>Example: salons in Chicago</p>
+          </div>
+          <div className="intro-card">
+            <h3>Live results</h3>
+            <p>Businesses stream in instantly.</p>
+          </div>
+          <div className="intro-card">
+            <h3>Tiles</h3>
+            <p>Coverage is shown on the map.</p>
+          </div>
+        </div>
+      </section>
+
+      <section className="quick-prompts">
+        <h2>Quick prompts</h2>
+        <div className="prompt-buttons">
+          {quickPrompts.map((text) => (
+            <button
+              key={text}
+              className="prompt-button"
+              type="button"
+              onClick={() => setPrompt(text)}
+            >
+              {text}
+            </button>
+          ))}
+        </div>
+      </section>
 
       {/* TEXTAREA SECTION */}
       {/* 
@@ -159,179 +426,197 @@ export default function Home() {
       */}
       <div className="input-section">
         <label htmlFor="prompt-input">Enter your prompt:</label>
+        <div className={`prompt-status ${prompt.trim() ? "ready" : "idle"}`}>
+          {prompt.trim()
+            ? "Ready to search"
+            : "Add a city"}
+        </div>
         <textarea
           id="prompt-input"
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Type your prompt here..."
+          placeholder="Example: Find coffee shops in Austin without websites"
           rows={6}
         />
+        <div className="radius-control">
+          <label htmlFor="radius-slider">
+            Search radius: <strong>{radiusKm} km</strong>
+          </label>
+          <input
+            id="radius-slider"
+            type="range"
+            min={10}
+            max={1000}
+            step={1}
+            value={radiusKm}
+            onChange={(event) => setRadiusKm(Number(event.target.value))}
+          />
+          <span className="radius-hint">10–1000 km</span>
+        </div>
       </div>
 
       {/* RUN BUTTON */}
       {/* 
         Button to trigger the action:
-        - onClick: calls handleRun function when clicked
-        - disabled: button is disabled when textarea is empty OR when loading
-        - Shows "Running..." text when isLoading is true
+        - disabled when textarea is empty OR when streaming
+        - shows "Streaming..." while results arrive
       */}
       <div className="button-section">
-        <button onClick={handleRun} disabled={!prompt.trim() || isLoading}>
-          {isLoading ? "Running..." : "Run"}
+        <button onClick={handleRun} disabled={!prompt.trim() || isStreaming}>
+          {isStreaming ? "Streaming..." : "Run"}
         </button>
       </div>
 
+      <div className="status-bar">
+        <div className="progress-row">
+          <span>Progress</span>
+          <span>{progressPercent}%</span>
+        </div>
+        <div className="progress-track">
+          <div
+            className="progress-fill"
+            style={{ width: `${progressPercent}%` }}
+          />
+        </div>
+        <div className="status-metrics">
+          <span>Elapsed: {formatTime(elapsedSeconds)}</span>
+          <span>ETA: {formatTime(etaSeconds)}</span>
+          <span>
+            Tiles: {progress?.tilesSearched ?? 0}/{progress?.totalTiles ?? 0}
+          </span>
+          <span>Found: {businesses.length}</span>
+        </div>
+        <div className="status-note">
+          Tile coverage: full scan (no timeout)
+        </div>
+      </div>
+
+      <section className="map-section">
+        <h2>Map view</h2>
+        {mapCenter ? (
+          <MapView
+            center={mapCenter}
+            radiusKm={metadata?.radiusKm ?? radiusKm}
+            tiles={tiles}
+            businesses={businesses}
+          />
+        ) : (
+          <div className="map-placeholder">
+            <p>Run a search to see the tiles and businesses on the map.</p>
+          </div>
+        )}
+      </section>
+
       {/* RESULTS SECTION */}
       {/* 
-        UI STATE LOGIC:
-        The results section displays different content based on state:
-        
-        1. LOADING STATE (isLoading === true):
-           - Shows loading message
-           - User knows request is in progress
-           
-        2. ERROR STATE (error !== null):
-           - Shows error message
-           - User knows something went wrong
-           - Can try again
-           
-        3. SUCCESS STATE (data !== null):
-           - Shows statistics (total, count without website)
-           - Shows table of businesses without website
-           - User can see the results
-           
-        4. EMPTY STATE (no data, no error, not loading):
-           - Shows placeholder message
-           - User hasn't searched yet
+        States:
+        - Streaming: show progress and loading copy
+        - Error: show error message
+        - Results: show businesses list as it grows
+        - Empty: no search yet
       */}
       <div className="results-section">
         <h2>Results</h2>
 
-        {/* LOADING STATE */}
-        {/* 
-          Displayed when isLoading is true
-          Shows user that the request is in progress
-          Prevents confusion about why nothing is happening
-        */}
-        {isLoading && (
+        {isStreaming && (
           <div className="loading-state">
-            <p>Searching for businesses...</p>
-            <p className="loading-hint">This may take a few seconds</p>
+            <p>Streaming businesses without websites...</p>
+            <p className="loading-hint">
+              {progress
+                ? `Tiles searched: ${progress.tilesSearched}/${progress.totalTiles}`
+                : "Initializing geo-tiling and search"}
+            </p>
           </div>
         )}
 
-        {/* ERROR STATE */}
-        {/* 
-          Displayed when error is not null
-          Shows the error message to help user understand what went wrong
-          User can fix the issue and try again
-        */}
-        {!isLoading && error && (
+        {!isStreaming && error && (
           <div className="error-state">
             <p className="error-title">Error</p>
             <p className="error-message">{error}</p>
           </div>
         )}
 
-        {/* SUCCESS STATE */}
-        {/* 
-          Displayed when data is not null and not loading
-          Shows the actual results from the API
-          Includes statistics and table
-        */}
-        {!isLoading && !error && data && (
+        {!error && businesses.length > 0 && (
           <div className="results-content">
-            {/* STATISTICS SECTION */}
-            {/* 
-              Display summary statistics:
-              - Total businesses found
-              - Count of businesses without website
-              
-              These numbers give users a quick overview before seeing the full list
-            */}
             <div className="statistics">
               <div className="stat-item">
-                <span className="stat-label">Total Businesses:</span>
-                <span className="stat-value">{data.summary.totalBusinesses}</span>
+                <span className="stat-label">Businesses Found:</span>
+                <span className="stat-value">{businesses.length}</span>
               </div>
               <div className="stat-item">
-                <span className="stat-label">Without Website:</span>
+                <span className="stat-label">Tiles Progress:</span>
                 <span className="stat-value stat-value-highlight">
-                  {data.summary.countWithoutWebsite}
+                  {progress
+                    ? `${progress.tilesSearched}/${progress.totalTiles}`
+                    : metadata
+                    ? `0/${metadata.tileCount}`
+                    : "—"}
                 </span>
               </div>
             </div>
 
-            {/* BUSINESSES TABLE */}
-            {/* 
-              Display businesses without website in a table format
-              
-              TABLE STRUCTURE:
-              - Header row with column names
-              - Data rows with business name and address
-              
-              CONDITIONAL RENDERING:
-              - If countWithoutWebsite > 0: Show table with businesses
-              - If countWithoutWebsite === 0: Show message that all businesses have websites
-              
-              This makes it easy to scan and read the results
-            */}
-            {data.summary.countWithoutWebsite > 0 ? (
-              <div className="table-container">
-                <h3>Businesses Without Website</h3>
-                <table className="businesses-table">
-                  {/* TABLE HEADER */}
-                  {/* 
-                    Defines column names
-                    Helps users understand what each column represents
-                  */}
-                  <thead>
-                    <tr>
-                      <th>Name</th>
-                      <th>Address</th>
+            <div className="table-container">
+              <h3>Businesses Without Website</h3>
+              <table className="businesses-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Address</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {businesses.slice(0, visibleCount).map((business) => (
+                    <tr key={business.place_id}>
+                      <td className="business-name">{business.name}</td>
+                      <td className="business-address">{business.address}</td>
+                      <td className="business-status">
+                        {business.has_website === false
+                          ? "No website"
+                          : "Needs check"}
+                      </td>
                     </tr>
-                  </thead>
-                  {/* TABLE BODY */}
-                  {/* 
-                    Maps through businessesWithoutWebsite array
-                    Creates one row per business
-                    Displays name in first column, address in second column
-                  */}
-                  <tbody>
-                    {data.businessesWithoutWebsite.map((business, index) => (
-                      <tr key={index}>
-                        <td className="business-name">{business.name}</td>
-                        <td className="business-address">{business.address}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              // NO BUSINESSES WITHOUT WEBSITE
-              // Displayed when all businesses have websites
-              <div className="no-results-message">
-                <p>✓ All businesses have websites!</p>
-              </div>
-            )}
+                  ))}
+                </tbody>
+              </table>
+              <div ref={loadMoreRef} className="load-more-trigger" />
+              {visibleCount < businesses.length && (
+                <div className="load-more-actions">
+                  <button
+                    type="button"
+                    className="prompt-button"
+                    onClick={() =>
+                      setVisibleCount((current) => current + RESULTS_PAGE_SIZE)
+                    }
+                  >
+                    Load more
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
-        {/* EMPTY STATE */}
-        {/* 
-          Displayed when:
-          - Not loading
-          - No error
-          - No data
-          
-          This is the initial state before user makes their first search
-        */}
-        {!isLoading && !error && !data && (
+        {!isStreaming && !error && businesses.length === 0 && (
           <div className="empty-state">
-            <p>No results yet. Enter a prompt and click Run to search for businesses.</p>
+            <p>
+              {hasSearched
+                ? "No businesses without websites were found for this radius."
+                : "No results yet. Enter a prompt and click Run."}
+            </p>
           </div>
         )}
       </div>
+
+      {toasts.length > 0 && (
+        <div className="toast-stack">
+          {toasts.map((toast) => (
+            <div key={toast.id} className="toast-item">
+              {toast.text}
+            </div>
+          ))}
+        </div>
+      )}
     </main>
   );
 }

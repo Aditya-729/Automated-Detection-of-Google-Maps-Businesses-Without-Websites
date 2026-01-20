@@ -32,7 +32,7 @@
  *   - NOT NULL: This field is required (can't be empty)
  * 
  * place_id TEXT NOT NULL UNIQUE,
- *   - place_id: The unique ID from Google Places API
+ *   - place_id: The unique ID from your business source (OpenStreetMap)
  *   - UNIQUE: No two businesses can have the same place_id
  *   - This is how we identify businesses (like a social security number)
  * 

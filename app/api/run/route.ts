@@ -1,17 +1,18 @@
 /**
  * API ROUTE (app/api/run/route.ts)
  * 
- * This creates a backend API endpoint at: /api/run
- * 
- * In Next.js App Router:
- * - app/api/[name]/route.ts = API endpoint at /api/[name]
- * - Export functions named after HTTP methods (GET, POST, PUT, DELETE)
- * - This file handles POST requests to /api/run
- * 
- * This is a Server-side API route (runs on the server, not in browser)
+ * Updated to:
+ * - Geo-tile a 10–60km radius into smaller tiles
+ * - Paginate through every tile page
+ * - Deduplicate and filter businesses without websites
+ * - Stream results progressively to the frontend
  */
 
 import { NextRequest, NextResponse } from "next/server";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import {
   getBusinessFromCache,
@@ -20,434 +21,689 @@ import {
   isDataFresh,
   BusinessRecord,
 } from "@/lib/db-businesses";
-import {
-  checkBusinessesWebsitesParallel,
-  buildGoogleMapsUrl,
-} from "@/lib/mino-api";
+import { buildGoogleMapsSearchUrl, checkBusinessWebsite } from "@/lib/mino-api";
 
 /**
- * PROTECTION CONSTANTS
- * 
- * These constants define limits to protect the system from:
- * - Resource exhaustion (too many API calls)
- * - Timeout issues (requests taking too long)
- * - Cost overruns (unlimited API usage)
+ * Gemini toggle
+ * - Set USE_GEMINI=true to enable live Gemini extraction.
+ * - Default is local/rule-based extraction for reliability.
  */
+const USE_GEMINI =
+  process.env.USE_GEMINI === "true" ||
+  (process.env.USE_GEMINI !== "false" && !!process.env.GEMINI_API_KEY);
+const GEMINI_FORCE_MOCK = process.env.GEMINI_FORCE_MOCK === "true";
 
 /**
- * MAX_BUSINESSES_LIMIT
- * 
- * WHY THIS PROTECTION EXISTS:
- * - Prevents processing too many businesses in a single request
- * - Limits API costs (each business = API calls to Google Places + Mino)
- * - Prevents timeouts (too many businesses = very long response time)
- * - Protects server resources (memory, CPU, database connections)
- * - Ensures reasonable response times for users
- * 
- * Example: If user searches "restaurants in New York", Google Places might return 100+ results
- * - Without limit: Process all 100 = 100+ API calls, 5+ minutes, high cost
- * - With limit: Process first 20 = 20 API calls, ~30 seconds, reasonable cost
- * 
- * Adjust this value based on your needs:
- * - Lower (10-20): Faster responses, lower costs, fewer results
- * - Higher (50-100): More results, slower responses, higher costs
+ * MINO API timeout logic (safe for Vercel limits).
  */
-const MAX_BUSINESSES_LIMIT = 20;
+const rawMinoTimeout = Number(process.env.MINO_API_TIMEOUT_MS || 8000);
+const MINO_API_TIMEOUT_MS =
+  process.env.NODE_ENV === "production"
+    ? Math.min(rawMinoTimeout, 8000)
+    : rawMinoTimeout;
 
-/**
- * MINO_API_TIMEOUT_MS
- * 
- * WHY THIS PROTECTION EXISTS:
- * - Mino API uses browser automation which can be slow
- * - Some pages might take a long time to load or might hang
- * - Without timeout, a single slow request can block the entire response
- * - Prevents user from waiting indefinitely
- * - Allows partial results (some businesses checked, some timed out)
- * 
- * VERCEL TIMEOUT LIMITS:
- * - Vercel Hobby plan: 10 seconds maximum execution time
- * - Vercel Pro plan: 60 seconds maximum execution time
- * - If our function takes longer, Vercel will kill it
- * - We set Mino timeout to 8 seconds to stay under Vercel's 10s limit
- * - This leaves 2 seconds for other operations (Gemini, Google Places, database)
- * 
- * Example: If Mino takes 30 seconds per business and we check 10 in parallel:
- * - Without timeout: Could wait 30+ seconds if one hangs
- * - With timeout: Fails after 8 seconds, continues with other businesses
- * 
- * 8 seconds is reasonable for:
- * - Page load time
- * - Browser automation overhead
- * - Network latency
- * - Stays under Vercel's 10-second limit (Hobby plan)
- */
-const MINO_API_TIMEOUT_MS = 8000; // 8 seconds (reduced for Vercel Hobby plan 10s limit)
+const NOMINATIM_RATE_LIMIT_MS = Number(
+  process.env.NOMINATIM_RATE_LIMIT_MS || 1100
+);
+const TILE_SIZE_KM = Number(process.env.TILE_SIZE_KM || 6);
+const TILE_OVERLAP_KM = Number(process.env.TILE_OVERLAP_KM || 1.5);
+const MAX_PAGE_SIZE = 50;
+const WEBSITE_CHECK_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.WEBSITE_CHECK_CONCURRENCY || 4)
+);
+const WEBSITE_CHECK_RETRIES = Math.max(
+  0,
+  Number(process.env.WEBSITE_CHECK_RETRIES || 2)
+);
+const OVERPASS_TIMEOUT_MS = Math.max(
+  5000,
+  Number(process.env.OVERPASS_TIMEOUT_MS || 25000)
+);
+const OVERPASS_RATE_LIMIT_MS = Math.max(
+  500,
+  Number(process.env.OVERPASS_RATE_LIMIT_MS || 1100)
+);
+const DEFAULT_RADIUS_KM = 50;
+const MIN_RADIUS_KM = 10;
+const MAX_RADIUS_KM = 1000;
 
-/**
- * Type definition for a business result from Google Places API
- */
 interface BusinessResult {
   name: string;
   address: string;
   place_id: string;
-  has_website?: boolean | null; // Whether business has a website (from Mino API check)
+  lat: number | null;
+  lon: number | null;
+  website?: string | null;
 }
 
-/**
- * Search for businesses using Google Places API with caching
- * 
- * CACHE STRATEGY:
- * 1. Before calling Google Places API, check if we already have the business in our database
- * 2. If found in cache: Use cached data (saves API calls and time)
- * 3. If not found: Call Google Places API to get fresh data
- * 4. Save the result to database for future use
- * 
- * This function uses Google Places Text Search API to find businesses.
- * 
- * API Logic:
- * 1. For each business type, create a search query combining business type + location
- * 2. Use Text Search API which is ideal when you have:
- *    - Business type/keyword (e.g., "coffee shop", "restaurant")
- *    - Location (e.g., "New York", "San Francisco")
- * 3. Text Search is better than Nearby Search here because:
- *    - Nearby Search requires lat/lng coordinates
- *    - Text Search works with location names/addresses
- *    - Text Search can handle multiple keywords naturally
- * 
- * Alternative: Nearby Search would be used if we had coordinates:
- * - Requires: latitude, longitude, radius
- * - Better for: "Find restaurants within 1km of this location"
- * 
- * @param businessTypes - Array of business types to search for
- * @param location - Location string (city, address, etc.) or null
- * @param apiKey - Google Maps API key
- * @returns Array of business results with name, address, and place_id
- */
-async function searchBusinesses(
-  businessTypes: string[],
-  location: string | null,
-  apiKey: string
-): Promise<BusinessResult[]> {
-  // If no business types, return empty array
-  if (!businessTypes || businessTypes.length === 0) {
-    return [];
+interface GeoPoint {
+  lat: number;
+  lon: number;
+}
+
+interface GeoTile {
+  id: string;
+  bounds: {
+    west: number;
+    east: number;
+    north: number;
+    south: number;
+  };
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const kmToLatDegrees = (km: number) => km / 111.32;
+const kmToLngDegrees = (km: number, atLat: number) =>
+  km / (111.32 * Math.cos((atLat * Math.PI) / 180));
+
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(max, Math.max(min, value));
+
+function buildTiles(
+  center: GeoPoint,
+  radiusKm: number,
+  tileSizeKm: number,
+  overlapKm: number
+): GeoTile[] {
+  const stepKm = Math.max(tileSizeKm - overlapKm, 1);
+  const steps = Math.ceil(radiusKm / stepKm);
+  const tiles: GeoTile[] = [];
+  const latStepDeg = kmToLatDegrees(stepKm);
+  const lonStepDeg = kmToLngDegrees(stepKm, center.lat);
+
+  let tileIndex = 0;
+  for (let y = -steps; y <= steps; y += 1) {
+    for (let x = -steps; x <= steps; x += 1) {
+      const offsetKm = Math.sqrt(x * x + y * y) * stepKm;
+      if (offsetKm > radiusKm + tileSizeKm / 2) {
+        continue;
+      }
+
+      const tileCenter: GeoPoint = {
+        lat: center.lat + y * latStepDeg,
+        lon: center.lon + x * lonStepDeg,
+      };
+
+      const halfLat = kmToLatDegrees(tileSizeKm / 2);
+      const halfLon = kmToLngDegrees(tileSizeKm / 2, tileCenter.lat);
+
+      tiles.push({
+        id: `tile-${tileIndex}`,
+        bounds: {
+          west: tileCenter.lon - halfLon,
+          east: tileCenter.lon + halfLon,
+          north: tileCenter.lat + halfLat,
+          south: tileCenter.lat - halfLat,
+        },
+      });
+      tileIndex += 1;
+    }
   }
 
-  // If no location, we can't search effectively
-  // Return empty array or you could search without location (less accurate)
-  if (!location) {
-    console.warn("No location provided, skipping business search");
-    return [];
+  return tiles;
+}
+
+function extractLocationFromPrompt(rawPrompt: string): string | null {
+  const cleaned = rawPrompt
+    .toLowerCase()
+    .replace(/\b(with|without)\s+(a\s+)?website[s]?\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const match =
+    cleaned.match(/\bin\s+([a-z0-9\s.,'-]+)$/i) ||
+    cleaned.match(/\bnear\s+([a-z0-9\s.,'-]+)$/i) ||
+    cleaned.match(/\baround\s+([a-z0-9\s.,'-]+)$/i) ||
+    cleaned.match(/\bat\s+([a-z0-9\s.,'-]+)$/i) ||
+    cleaned.match(/\bin\s+([a-z0-9\s.,'-]+?)(?:,|\s+with|\s+without|$)/i) ||
+    cleaned.match(/\bnear\s+([a-z0-9\s.,'-]+?)(?:,|\s+with|\s+without|$)/i) ||
+    cleaned.match(/\baround\s+([a-z0-9\s.,'-]+?)(?:,|\s+with|\s+without|$)/i) ||
+    cleaned.match(/\bat\s+([a-z0-9\s.,'-]+?)(?:,|\s+with|\s+without|$)/i);
+
+  if (!match) {
+    return null;
   }
 
-  // Array to store all business results
-  const allBusinesses: BusinessResult[] = [];
+  return match[1].trim().replace(/\s+/g, " ");
+}
 
-  // Search for each business type
-  // We search separately for each type to get more specific results
-  for (const businessType of businessTypes) {
-    try {
-      /**
-       * Build the search query for Google Places Text Search
-       * 
-       * Query format: "business type in location"
-       * Examples:
-       * - "coffee shop in New York"
-       * - "restaurant in San Francisco"
-       * - "gym near Times Square"
-       * 
-       * The Text Search API is flexible and can handle various query formats
-       */
-      const query = `${businessType} in ${location}`;
+function extractBusinessTypesFromPrompt(rawPrompt: string): string[] {
+  const prompt = rawPrompt.toLowerCase();
+  const keywords: Array<[RegExp, string]> = [
+    [/\brestaurants?\b/, "restaurant"],
+    [/\bspas?\b/, "spa"],
+    [/\bgyms?\b/, "gym"],
+    [/\bsalons?\b/, "salon"],
+    [/\bcoffee\s*shops?\b/, "coffee shop"],
+    [/\bcafes?\b/, "cafe"],
+    [/\bgrocery\s*stores?\b/, "grocery store"],
+    [/\bhotels?\b/, "hotel"],
+    [/\bclinics?\b/, "clinic"],
+    [/\bdentists?\b/, "dentist"],
+    [/\bbarbers?\b/, "barber"],
+  ];
 
-      /**
-       * Google Places API Text Search endpoint
-       * 
-       * Endpoint: https://maps.googleapis.com/maps/api/place/textsearch/json
-       * 
-       * Required parameters:
-       * - query: The search query string
-       * - key: Your Google Maps API key
-       * 
-       * Optional parameters:
-       * - type: Filter by place type (restaurant, cafe, etc.)
-       * - location: Bias results to a location (lat,lng)
-       * - radius: Limit results within radius (in meters)
-       * 
-       * Response structure:
-       * {
-       *   "results": [
-       *     {
-       *       "name": "Business Name",
-       *       "formatted_address": "Full Address",
-       *       "place_id": "unique_place_id",
-       *       ...
-       *     }
-       *   ],
-       *   "status": "OK"
-       * }
-       */
-      const apiUrl = new URL(
-        "https://maps.googleapis.com/maps/api/place/textsearch/json"
-      );
-      apiUrl.searchParams.append("query", query);
-      apiUrl.searchParams.append("key", apiKey);
+  const types = new Set<string>();
+  for (const [pattern, value] of keywords) {
+    if (pattern.test(prompt)) {
+      types.add(value);
+    }
+  }
 
-      // Make the API request
-      const response = await fetch(apiUrl.toString());
+  if (types.size === 0) {
+    const fallbackMatch = prompt.match(
+      /\b(find|list|show)\s+([a-z\s,]+?)\s+in\b/i
+    );
+    if (fallbackMatch) {
+      fallbackMatch[2]
+        .split(/,|and|&/i)
+        .map((chunk) => chunk.trim())
+        .filter(Boolean)
+        .forEach((chunk) => types.add(chunk));
+    }
+  }
 
-      /**
-       * PROTECTION: Handle Google Places API Errors Gracefully
-       * 
-       * WHY THIS PROTECTION EXISTS:
-       * - Google Places API can return various error statuses
-       * - Some errors are recoverable (rate limit, temporary issues)
-       * - Some errors are permanent (invalid API key, quota exceeded)
-       * - We don't want one failed search to break the entire request
-       * 
-       * ERROR HANDLING STRATEGY:
-       * - Continue processing other business types even if one fails
-       * - Log the error for debugging
-       * - Don't throw - allows partial results
-       * 
-       * Common errors:
-       * - 429 (Too Many Requests): Rate limit hit, wait and retry
-       * - 400 (Bad Request): Invalid parameters, skip this search
-       * - 403 (Forbidden): API key issue, skip this search
-       * - 500 (Server Error): Google's server issue, skip this search
-       */
+  if (types.size === 0) {
+    types.add("business");
+  }
+
+  return Array.from(types);
+}
+
+function parseGeminiJson(responseText: string) {
+  const cleanedText = responseText
+    .replace(/```json\n?/g, "")
+    .replace(/```\n?/g, "")
+    .trim();
+
+  try {
+    return JSON.parse(cleanedText);
+  } catch {
+    const jsonMatch = cleanedText.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      return JSON.parse(jsonMatch[0]);
+    }
+  }
+
+  return null;
+}
+
+async function geocodeLocation(
+  location: string,
+  signal?: AbortSignal
+): Promise<GeoPoint | null> {
+  const url = new URL("https://nominatim.openstreetmap.org/search");
+  url.searchParams.append("q", location);
+  url.searchParams.append("format", "json");
+  url.searchParams.append("limit", "1");
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      "User-Agent": "business-website-checker/1.0",
+    },
+    signal,
+  });
+
+  if (!response.ok) {
+    return null;
+  }
+
+  const data = await response.json().catch(() => null);
+  if (!Array.isArray(data) || data.length === 0) {
+    return null;
+  }
+
+  const [first] = data;
+  const lat = Number(first.lat);
+  const lon = Number(first.lon);
+
+  if (Number.isNaN(lat) || Number.isNaN(lon)) {
+    return null;
+  }
+
+  return { lat, lon };
+}
+
+let lastNominatimRequestAt = 0;
+let lastOverpassRequestAt = 0;
+
+async function fetchNominatim(url: URL, signal?: AbortSignal) {
+  const now = Date.now();
+  const waitMs = Math.max(
+    0,
+    NOMINATIM_RATE_LIMIT_MS - (now - lastNominatimRequestAt)
+  );
+  if (waitMs > 0) {
+    await sleep(waitMs);
+  }
+  lastNominatimRequestAt = Date.now();
+
+  const response = await fetch(url.toString(), {
+        headers: {
+          "User-Agent": "business-website-checker/1.0",
+        },
+    signal,
+  });
+
       if (!response.ok) {
         const errorText = await response.text().catch(() => "");
-        console.error(
-          `Google Places API error for "${businessType}":`,
-          response.status,
-          errorText
-        );
-        // Continue with next business type instead of failing entire request
-        continue;
+    console.error("Nominatim error:", response.status, errorText);
+    return [];
+  }
+
+  const data = await response.json().catch(() => []);
+  return Array.isArray(data) ? data : [];
+}
+
+async function fetchOverpass(query: string, signal?: AbortSignal) {
+  const now = Date.now();
+  const waitMs = Math.max(0, OVERPASS_RATE_LIMIT_MS - (now - lastOverpassRequestAt));
+  if (waitMs > 0) {
+    await sleep(waitMs);
+  }
+  lastOverpassRequestAt = Date.now();
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), OVERPASS_TIMEOUT_MS);
+
+  try {
+    const response = await fetch("https://overpass-api.de/api/interpreter", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "business-website-checker/1.0",
+      },
+      body: `data=${encodeURIComponent(query)}`,
+      signal: signal ?? controller.signal,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      console.error("Overpass error:", response.status, errorText);
+      return [];
+    }
+
+    const data = await response.json().catch(() => null);
+    return Array.isArray(data?.elements) ? data.elements : [];
+  } catch (error) {
+    if (error instanceof Error && error.name !== "AbortError") {
+      console.error("Overpass fetch error:", error);
+    }
+    return [];
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function buildPlaceId(place: {
+  osm_type?: string;
+  osm_id?: string | number;
+  place_id?: string | number;
+}) {
+  if (place.osm_type && place.osm_id) {
+    return `osm:${place.osm_type}:${place.osm_id}`;
+  }
+  return String(place.place_id || "");
+}
+
+function normalizeBusiness(place: {
+  display_name?: string;
+  osm_type?: string;
+  osm_id?: string | number;
+  place_id?: string | number;
+  lat?: string | number;
+  lon?: string | number;
+  extratags?: Record<string, string>;
+}) {
+  const placeId = buildPlaceId(place);
+  const displayName = place.display_name || "Unknown";
+  const name = displayName.split(",")[0] || "Unknown";
+  const lat = Number(place.lat);
+  const lon = Number(place.lon);
+  const extratags = place.extratags || {};
+  const website =
+    extratags.website ||
+    extratags["contact:website"] ||
+    extratags.url ||
+    extratags["contact:url"] ||
+    null;
+
+  return {
+    place_id: placeId,
+    name,
+    address: displayName,
+    lat: Number.isNaN(lat) ? null : lat,
+    lon: Number.isNaN(lon) ? null : lon,
+    website,
+  };
+}
+
+const OVERPASS_TYPE_MAP: Record<
+  string,
+  {
+    amenity?: string[];
+    shop?: string[];
+    tourism?: string[];
+    leisure?: string[];
+    office?: string[];
+    craft?: string[];
+    healthcare?: string[];
+  }
+> = {
+  restaurant: { amenity: ["restaurant"] },
+  cafe: { amenity: ["cafe"] },
+  "coffee shop": { amenity: ["cafe"] },
+  gym: { leisure: ["fitness_centre"] },
+  salon: { shop: ["hairdresser", "beauty"] },
+  barber: { shop: ["hairdresser"] },
+  spa: { amenity: ["spa"] },
+  hotel: { tourism: ["hotel"] },
+  clinic: { healthcare: ["clinic"], amenity: ["clinic"] },
+  dentist: { healthcare: ["dentist"], amenity: ["dentist"] },
+  "grocery store": { shop: ["supermarket", "convenience", "greengrocer"] },
+};
+
+function buildOverpassQuery(bounds: GeoTile["bounds"], businessTypes: string[]) {
+  const tagQueries: string[] = [];
+
+  const addTagGroup = (key: string, values: string[]) => {
+    if (values.length === 0) {
+      return;
+    }
+    const regex = values.join("|");
+    tagQueries.push(`node["${key}"~"${regex}"](${bounds.south},${bounds.west},${bounds.north},${bounds.east});`);
+    tagQueries.push(`way["${key}"~"${regex}"](${bounds.south},${bounds.west},${bounds.north},${bounds.east});`);
+    tagQueries.push(`relation["${key}"~"${regex}"](${bounds.south},${bounds.west},${bounds.north},${bounds.east});`);
+  };
+
+  const normalized = businessTypes.map((type) => type.toLowerCase().trim());
+  const collected = {
+    amenity: new Set<string>(),
+    shop: new Set<string>(),
+    tourism: new Set<string>(),
+    leisure: new Set<string>(),
+    office: new Set<string>(),
+    craft: new Set<string>(),
+    healthcare: new Set<string>(),
+  };
+
+  for (const type of normalized) {
+    const mapEntry = OVERPASS_TYPE_MAP[type];
+    if (mapEntry) {
+      mapEntry.amenity?.forEach((value) => collected.amenity.add(value));
+      mapEntry.shop?.forEach((value) => collected.shop.add(value));
+      mapEntry.tourism?.forEach((value) => collected.tourism.add(value));
+      mapEntry.leisure?.forEach((value) => collected.leisure.add(value));
+      mapEntry.office?.forEach((value) => collected.office.add(value));
+      mapEntry.craft?.forEach((value) => collected.craft.add(value));
+      mapEntry.healthcare?.forEach((value) => collected.healthcare.add(value));
+    }
+  }
+
+  const hasSpecificTags =
+    collected.amenity.size ||
+    collected.shop.size ||
+    collected.tourism.size ||
+    collected.leisure.size ||
+    collected.office.size ||
+    collected.craft.size ||
+    collected.healthcare.size;
+
+  if (hasSpecificTags) {
+    addTagGroup("amenity", Array.from(collected.amenity));
+    addTagGroup("shop", Array.from(collected.shop));
+    addTagGroup("tourism", Array.from(collected.tourism));
+    addTagGroup("leisure", Array.from(collected.leisure));
+    addTagGroup("office", Array.from(collected.office));
+    addTagGroup("craft", Array.from(collected.craft));
+    addTagGroup("healthcare", Array.from(collected.healthcare));
+  } else {
+    addTagGroup("amenity", ["*"]);
+    addTagGroup("shop", ["*"]);
+    addTagGroup("tourism", ["*"]);
+    addTagGroup("office", ["*"]);
+    addTagGroup("craft", ["*"]);
+    addTagGroup("healthcare", ["*"]);
+    addTagGroup("leisure", ["*"]);
+  }
+
+  return `[out:json][timeout:25];(${tagQueries.join("")});out center tags;`;
+}
+
+function formatOverpassAddress(tags: Record<string, string>) {
+  const parts = [
+    tags["addr:housenumber"],
+    tags["addr:street"],
+    tags["addr:city"],
+    tags["addr:state"],
+    tags["addr:postcode"],
+    tags["addr:country"],
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return parts || tags["addr:full"] || tags["addr:place"] || "Unknown";
+}
+
+function normalizeOverpassBusiness(element: {
+  type: string;
+  id: number;
+  lat?: number;
+  lon?: number;
+  center?: { lat: number; lon: number };
+  tags?: Record<string, string>;
+}): BusinessResult | null {
+  const tags = element.tags || {};
+  const name = tags.name || tags.brand || "Unknown";
+  const address = formatOverpassAddress(tags);
+  const coordinates = element.center || { lat: element.lat, lon: element.lon };
+  const lat = coordinates?.lat;
+  const lon = coordinates?.lon;
+  if (typeof lat !== "number" || typeof lon !== "number") {
+    return null;
+  }
+
+  const website =
+    tags.website ||
+    tags["contact:website"] ||
+    tags.url ||
+    tags["contact:url"] ||
+    null;
+
+  return {
+    place_id: `osm:${element.type}:${element.id}`,
+    name,
+    address,
+    lat,
+    lon,
+    website,
+  };
+}
+
+async function fetchBusinessesFromOverpass(
+  tile: GeoTile,
+  businessTypes: string[],
+  signal?: AbortSignal
+): Promise<BusinessResult[]> {
+  const query = buildOverpassQuery(tile.bounds, businessTypes);
+  const elements = await fetchOverpass(query, signal);
+  const results: BusinessResult[] = [];
+
+  for (const element of elements) {
+    const business = normalizeOverpassBusiness(element);
+    if (business?.place_id) {
+      results.push(business);
+    }
+  }
+
+  return results;
+}
+
+async function fetchBusinessesForTile(
+  businessType: string,
+  tile: GeoTile,
+  locationHint: string | null,
+  signal?: AbortSignal
+): Promise<BusinessResult[]> {
+  const results: BusinessResult[] = [];
+  let offset = 0;
+  const query =
+    locationHint && locationHint.trim().length > 0
+      ? `${businessType} in ${locationHint}`
+      : businessType;
+
+  while (true) {
+    const url = new URL("https://nominatim.openstreetmap.org/search");
+    url.searchParams.append("q", query);
+    url.searchParams.append("format", "json");
+    url.searchParams.append("addressdetails", "1");
+    url.searchParams.append("extratags", "1");
+    url.searchParams.append("limit", String(MAX_PAGE_SIZE));
+    url.searchParams.append("offset", String(offset));
+    url.searchParams.append(
+      "viewbox",
+      `${tile.bounds.west},${tile.bounds.north},${tile.bounds.east},${tile.bounds.south}`
+    );
+    url.searchParams.append("bounded", "1");
+
+    const data = await fetchNominatim(url, signal);
+    if (data.length === 0) {
+      break;
+    }
+
+    for (const place of data) {
+      const business = normalizeBusiness(place);
+      if (business.place_id) {
+        results.push(business);
       }
+    }
 
-      let data;
-      try {
-        data = await response.json();
-      } catch (parseError) {
-        /**
-         * PROTECTION: Handle JSON Parse Errors
-         * 
-         * WHY THIS PROTECTION EXISTS:
-         * - API might return non-JSON response (HTML error page, plain text)
-         * - Network issues might corrupt the response
-         * - We don't want a parse error to crash the entire request
-         * 
-         * WHAT HAPPENS:
-         * - Log the error
-         * - Skip this business type
-         * - Continue processing other business types
-         */
-        console.error(
-          `Failed to parse Google Places API response for "${businessType}":`,
-          parseError
-        );
-        continue;
-      }
+    if (data.length < MAX_PAGE_SIZE) {
+      break;
+    }
 
-      /**
-       * PROTECTION: Handle Google Places API Response Status
-       * 
-       * WHY THIS PROTECTION EXISTS:
-       * - Google Places API returns status codes in the response body
-       * - Different statuses require different handling
-       * - Some statuses indicate errors that should be logged
-       * - We want to handle all cases gracefully
-       * 
-       * STATUS HANDLING:
-       * - "OK": Success, process results
-       * - "ZERO_RESULTS": No results (normal, not an error)
-       * - "OVER_QUERY_LIMIT": Quota exceeded (log warning, skip)
-       * - "REQUEST_DENIED": Invalid API key (log error, skip)
-       * - "INVALID_REQUEST": Bad parameters (log error, skip)
-       * 
-       * We continue processing even if one business type fails
-       */
-      if (data.status === "OK" && data.results && Array.isArray(data.results)) {
-        // Process each result from the API
-        for (const place of data.results) {
-          const placeId = place.place_id || "";
+    offset += MAX_PAGE_SIZE;
+  }
 
-          // CACHE CHECK: Before using API data, check if we have it in database
-          // This saves API calls and speeds up responses
-          let cachedBusiness = await getBusinessFromCache(placeId);
+  return results;
+}
 
-          if (cachedBusiness) {
-            /**
-             * BUSINESS FOUND IN CACHE
-             * 
-             * We already have this business in our database, so we use cached data.
-             * This means:
-             * - We don't need to save it again (already saved)
-             * - Response is faster (no database write needed)
-             * - We save API quota
-             * 
-             * Note: We still use the API data for address (in case it changed),
-             * but we keep the cached name and other fields
-             */
-            allBusinesses.push({
-              name: cachedBusiness.name,
-              address: place.formatted_address || "Address not available",
-              place_id: placeId,
-            });
-          } else {
-            /**
-             * BUSINESS NOT IN CACHE
-             * 
-             * This is a new business we haven't seen before.
-             * We need to:
-             * 1. Use the data from Google Places API
-             * 2. Save it to our database for future use
-             * 
-             * Note: has_website is set to null initially (we haven't checked yet)
-             * You can add logic later to check if a business has a website
-             */
-            const businessData: BusinessRecord = {
-              name: place.name || "Unknown",
-              place_id: placeId,
-              has_website: null, // We'll check this later if needed
+async function resolveHasWebsite(
+  business: BusinessResult,
+  minoApiKey: string | undefined
+): Promise<boolean | null> {
+  const cached = await getBusinessFromCache(business.place_id);
+
+  if (cached && cached.has_website !== null && isDataFresh(cached.last_checked_at, 24)) {
+    return cached.has_website;
+  }
+
+  if (business.website && business.website.trim().length > 0) {
+    try {
+      await updateBusiness(business.place_id, {
+        has_website: true,
+        last_checked_at: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error(`Failed to update has_website for ${business.place_id}:`, error);
+    }
+    return true;
+  }
+
+  if (!cached) {
+    const businessRecord: BusinessRecord = {
+      name: business.name,
+      place_id: business.place_id,
+      has_website: null,
               last_checked_at: new Date().toISOString(),
             };
 
-            // Save to database (cache it for next time)
-            try {
-              await upsertBusiness(businessData);
-            } catch (dbError) {
-              // If database save fails, we still return the business
-              // (don't fail the whole request because of cache issue)
-              console.error("Failed to cache business:", dbError);
-            }
-
-            // Add to results
-            allBusinesses.push({
-              name: businessData.name,
-              address: place.formatted_address || "Address not available",
-              place_id: placeId,
-            });
-          }
-        }
-      } else if (data.status === "ZERO_RESULTS") {
-        // No results found for this business type - this is normal, just continue
-        console.log(`No results found for "${businessType}" in ${location}`);
-      } else {
-        /**
-         * PROTECTION: Handle Non-OK API Status Codes
-         * 
-         * WHY THIS PROTECTION EXISTS:
-         * - API returned an error status (OVER_QUERY_LIMIT, REQUEST_DENIED, etc.)
-         * - We log the error but don't fail the entire request
-         * - Allows partial results (some business types succeed, some fail)
-         * 
-         * WHAT HAPPENS:
-         * - Log error with status and message
-         * - Continue processing other business types
-         * - User still gets results from successful searches
-         */
-        console.error(
-          `Google Places API error for "${businessType}":`,
-          data.status,
-          data.error_message || ""
-        );
-        // Continue with next business type - don't fail entire request
-      }
+    try {
+      await upsertBusiness(businessRecord);
     } catch (error) {
-      // Handle network errors or other exceptions
-      console.error(`Error searching for "${businessType}":`, error);
-      // Continue with next business type even if one fails
+      console.error("Failed to cache business:", error);
     }
   }
 
-  // Remove duplicates based on place_id
-  // Same business might appear in multiple searches
-  const uniqueBusinesses = Array.from(
-    new Map(allBusinesses.map((b) => [b.place_id, b])).values()
-  );
+  if (!minoApiKey) {
+    return null;
+  }
 
-  return uniqueBusinesses;
+  const googleMapsUrl = buildGoogleMapsSearchUrl(
+    business.name,
+    business.address
+  );
+  let hasWebsite: boolean | null = null;
+  for (let attempt = 0; attempt <= WEBSITE_CHECK_RETRIES; attempt += 1) {
+    hasWebsite = await checkBusinessWebsite(
+      googleMapsUrl,
+      minoApiKey,
+      MINO_API_TIMEOUT_MS
+    );
+    if (hasWebsite !== null) {
+      break;
+    }
+    if (attempt < WEBSITE_CHECK_RETRIES) {
+      await sleep(400 + attempt * 400);
+    }
+  }
+
+  try {
+    await updateBusiness(business.place_id, {
+      has_website: hasWebsite,
+      last_checked_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error(`Failed to update has_website for ${business.place_id}:`, error);
+  }
+
+  return hasWebsite;
 }
 
-/**
- * POST handler function
- * 
- * This function:
- * 1. Receives user prompt from frontend
- * 2. Sends it to Gemini API to extract business types and location
- * 3. Returns structured JSON response
- * 
- * @param request - The incoming HTTP request object
- * @returns NextResponse with structured JSON data
- */
-/**
- * VERCEL DEPLOYMENT NOTE:
- * 
- * This function runs as a "serverless function" on Vercel.
- * 
- * What does that mean?
- * - Vercel creates a temporary server just for this request
- * - After the request completes, the server is destroyed
- * - This is efficient and cost-effective
- * 
- * Important limits:
- * - Hobby plan: 10 seconds maximum execution time
- * - Pro plan: 60 seconds maximum execution time
- * - If we exceed the limit, Vercel will kill the function
- * - That's why we have timeouts and limits in place
- * 
- * Our protections:
- * - MAX_BUSINESSES_LIMIT: Limits how many businesses we process
- * - MINO_API_TIMEOUT_MS: Limits how long each Mino call can take
- * - These ensure we stay under Vercel's time limits
- */
+async function processWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  handler: (item: T) => Promise<void>
+) {
+  const executing = new Set<Promise<void>>();
+
+  for (const item of items) {
+    const task = handler(item).finally(() => executing.delete(task));
+    executing.add(task);
+
+    if (executing.size >= limit) {
+      await Promise.race(executing);
+    }
+  }
+
+  await Promise.allSettled(executing);
+}
+
 export async function POST(request: NextRequest) {
   try {
-    // Parse the JSON body from the request
-    // The frontend will send { prompt: "user's text" }
     const body = await request.json();
-    const { prompt } = body;
+    const { prompt, radiusKm: radiusKmRaw } = body;
 
-    // Validate that prompt exists
     if (!prompt || typeof prompt !== "string") {
       return NextResponse.json(
         { error: "Prompt is required and must be a string" },
-        { status: 400 } // 400 = Bad Request
+        { status: 400 }
       );
     }
 
-    // Get API key from environment variables
-    // In Next.js, environment variables are accessed via process.env
-    // Make sure to set GEMINI_API_KEY in your .env.local file
     const apiKey = process.env.GEMINI_API_KEY;
 
-    if (!apiKey) {
-      console.error("GEMINI_API_KEY is not set in environment variables");
-      return NextResponse.json(
-        { error: "API key not configured" },
-        { status: 500 }
-      );
-    }
+    const radiusKm = clamp(
+      Number(radiusKmRaw || DEFAULT_RADIUS_KM),
+      MIN_RADIUS_KM,
+      MAX_RADIUS_KM
+    );
 
-    // Initialize Gemini AI client
-    // GoogleGenerativeAI is the main class from the SDK
-    const genAI = new GoogleGenerativeAI(apiKey);
+    const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
+    const model = genAI?.getGenerativeModel({ model: "gemini-2.0-flash" });
 
-    // Get the Gemini Pro model
-    // You can use different models: gemini-pro, gemini-pro-vision, etc.
-    const model = genAI.getGenerativeModel({ model: "gemini-pro" });
-
-    /**
-     * Create a prompt for Gemini to extract business information
-     * 
-     * We're using a structured prompt that asks Gemini to:
-     * 1. Extract business types from the user's text
-     * 2. Extract location information
-     * 3. Return the result as valid JSON
-     */
     const extractionPrompt = `
 Analyze the following user prompt and extract business types and location information.
 
@@ -469,85 +725,86 @@ If no location is found, return null for location.
 Only return the JSON object, no additional text or explanation.
 `;
 
-    /**
-     * PROTECTION: Handle Gemini API Errors Gracefully
-     * 
-     * WHY THIS PROTECTION EXISTS:
-     * - Gemini API can fail for various reasons (rate limits, quota, network)
-     * - API might return errors or malformed responses
-     * - We want to provide helpful error messages to users
-     * - Don't want API errors to crash the entire request
-     */
-    let result;
-    let response;
-    let responseText;
+    let responseText = "";
+    let usedGeminiMock = false;
+    let geminiErrorMessage: string | null = null;
 
     try {
-      // Send the prompt to Gemini and get response
-      // generateContent() sends the prompt and returns a response object
-      result = await model.generateContent(extractionPrompt);
-      response = await result.response;
+      if (!USE_GEMINI || GEMINI_FORCE_MOCK || !apiKey) {
+        usedGeminiMock = true;
+        const extractedTypes = extractBusinessTypesFromPrompt(prompt);
+        const mockBusinessTypes =
+          extractedTypes.length > 0 ? extractedTypes : ["restaurant"];
+        const extractedLocation = extractLocationFromPrompt(prompt);
+        const mockLocation = extractedLocation
+          ? extractedLocation
+              .split(" ")
+              .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+              .join(" ")
+          : null;
 
-      // Get the text content from Gemini's response
-      responseText = response.text().trim();
+        responseText = JSON.stringify({
+          businessTypes: mockBusinessTypes,
+          location: mockLocation,
+        });
+      } else {
+        const result = await model!.generateContent(extractionPrompt);
+        const response = await result.response;
+        responseText = response.text().trim();
+      }
     } catch (geminiError) {
-      /**
-       * PROTECTION: Catch Gemini API Errors
-       * 
-       * WHY THIS PROTECTION EXISTS:
-       * - Network errors (no connection to Gemini API)
-       * - Rate limit errors (too many requests)
-       * - Quota errors (API quota exceeded)
-       * - Invalid API key errors
-       * - Other API errors
-       * 
-       * ERROR HANDLING:
-       * - Log the error for debugging
-       * - Return user-friendly error message
-       * - Include error details in response
-       */
       console.error("Gemini API error:", geminiError);
       const errorMessage =
         geminiError instanceof Error
           ? geminiError.message
           : "Failed to process prompt with AI";
+      geminiErrorMessage = errorMessage;
 
-      return NextResponse.json(
-        {
-          error: "AI processing failed",
-          message: errorMessage,
-          suggestion:
-            "Please check your API key and try again. If the issue persists, the AI service may be temporarily unavailable.",
-        },
-        { status: 500 }
-      );
+      const isQuotaZero =
+        typeof errorMessage === "string" &&
+        (errorMessage.includes("Quota exceeded") ||
+          errorMessage.includes("quota") ||
+          errorMessage.includes("generate_content_free_tier"));
+
+      if (isQuotaZero) {
+        usedGeminiMock = true;
+        const fallbackLocation = extractLocationFromPrompt(prompt);
+        responseText = JSON.stringify({
+          businessTypes: ["restaurant"],
+          location: fallbackLocation,
+        });
+      } else {
+        return NextResponse.json(
+          {
+            error: "AI processing failed",
+            message: errorMessage,
+            suggestion:
+              "Please check your API key and try again. If the issue persists, the AI service may be temporarily unavailable.",
+          },
+          { status: 500 }
+        );
+      }
     }
 
-    // Parse the JSON response from Gemini
-    // Gemini should return valid JSON, but we need to handle potential parsing errors
-    let extractedData;
+    let extractedData: { businessTypes: string[]; location: string | null } | null =
+      null;
     try {
-      // Sometimes Gemini wraps JSON in markdown code blocks, so we clean it
-      const cleanedText = responseText
-        .replace(/```json\n?/g, "") // Remove ```json
-        .replace(/```\n?/g, "") // Remove ```
-        .trim();
-
-      extractedData = JSON.parse(cleanedText);
+      extractedData = parseGeminiJson(responseText);
     } catch (parseError) {
-      // If JSON parsing fails, return the raw response for debugging
-      console.error("Failed to parse Gemini response as JSON:", responseText);
-      return NextResponse.json(
-        {
-          error: "Failed to parse AI response",
-          rawResponse: responseText,
-        },
-        { status: 500 }
-      );
+      console.error("Gemini JSON parse error:", parseError);
     }
 
-    // Validate the extracted data structure
-    // Ensure it has the expected format
+    if (!extractedData) {
+      geminiErrorMessage =
+        geminiErrorMessage || "Gemini response JSON could not be parsed.";
+      const fallbackTypes = extractBusinessTypesFromPrompt(prompt);
+      const fallbackLocation = extractLocationFromPrompt(prompt);
+      extractedData = {
+        businessTypes: fallbackTypes,
+        location: fallbackLocation,
+      };
+    }
+
     if (
       !extractedData ||
       typeof extractedData !== "object" ||
@@ -564,278 +821,177 @@ Only return the JSON object, no additional text or explanation.
       );
     }
 
-    // Google Maps API key (optional)
-    // NOTE: If you do NOT want to use Google Maps / Google Places, simply do not set this variable.
-    // The app will still work, but it will return 0 businesses because it can't do the business search step.
-    const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY;
+    if (!extractedData.location) {
+      extractedData.location = extractLocationFromPrompt(prompt);
+    }
 
-    // Search for businesses using Google Places API (only if Google Maps key is provided)
-    // We'll search for each business type in the location
-    let businesses: BusinessResult[] = [];
-    let originalCount = 0;
-
-    if (googleMapsApiKey) {
-      businesses = await searchBusinesses(
-        extractedData.businessTypes,
-        extractedData.location,
-        googleMapsApiKey
-      );
-      originalCount = businesses.length;
-    } else {
-      // No key provided: skip business search (minimal behavior change, avoids crashing)
-      console.warn(
-        "GOOGLE_MAPS_API_KEY is not set. Skipping Google Places search and returning 0 businesses."
+    if (!extractedData.location) {
+      return NextResponse.json(
+        { error: "Location could not be extracted from the prompt." },
+        { status: 400 }
       );
     }
 
-    /**
-     * PROTECTION: Limit Maximum Businesses Processed
-     * 
-     * WHY THIS PROTECTION EXISTS:
-     * - Prevents processing too many businesses in one request
-     * - Limits API costs (each business requires multiple API calls)
-     * - Ensures reasonable response times
-     * - Protects server resources
-     * 
-     * WHAT HAPPENS:
-     * - If businesses.length > MAX_BUSINESSES_LIMIT, we only process the first N
-     * - We log a warning so you know results were truncated
-     * - User still gets results, just limited to the first MAX_BUSINESSES_LIMIT
-     * 
-     * Example:
-     * - Google Places returns 50 businesses
-     * - MAX_BUSINESSES_LIMIT = 20
-     * - We process first 20, log warning, return 20 results
-     */
-    // Only apply limiting logic if we actually have businesses
-    if (businesses.length > MAX_BUSINESSES_LIMIT) {
-      console.warn(
-        `Business limit exceeded: Found ${businesses.length} businesses, limiting to ${MAX_BUSINESSES_LIMIT}`
-      );
-      businesses = businesses.slice(0, MAX_BUSINESSES_LIMIT);
+    if (extractedData.businessTypes.length === 0) {
+      extractedData.businessTypes = extractBusinessTypesFromPrompt(prompt);
     }
 
-    /**
-     * WEBSITE CHECKING DECISION LOGIC
-     * 
-     * For each business, we decide whether to use cache or check via Mino API:
-     * 
-     * DECISION FLOW:
-     * 1. Check if business exists in Supabase database
-     * 2. If exists:
-     *    a. Check if last_checked_at is less than 24 hours ago
-     *    b. If YES (data is fresh) → Use cached has_website value
-     *    c. If NO (data is stale) → Re-check via Mino API
-     * 3. If not exists:
-     *    → Check via Mino API (new business)
-     * 4. Save result back to Supabase (update last_checked_at)
-     * 
-     * WHY 24 HOURS?
-     * - Businesses might add/remove websites over time
-     * - 24 hours balances freshness vs API costs
-     * - You can adjust this threshold if needed
-     */
-    const businessesToCheck: Array<{ place_id: string; googleMapsUrl: string }> =
-      [];
-    const websiteResults = new Map<string, boolean>();
+    if (extractedData.businessTypes.length === 0) {
+      return NextResponse.json(
+        { error: "No business types found in the prompt." },
+        { status: 400 }
+      );
+    }
 
-    // Get Mino API key for website checking
+    const center = await geocodeLocation(extractedData.location, request.signal);
+    if (!center) {
+      return NextResponse.json(
+        { error: "Unable to geocode the provided location." },
+        { status: 400 }
+      );
+    }
+
+    const tiles = buildTiles(
+      center,
+      radiusKm,
+      TILE_SIZE_KM,
+      TILE_OVERLAP_KM
+    );
     const minoApiKey = process.env.MINO_API_KEY;
+    const encoder = new TextEncoder();
 
-    if (minoApiKey && businesses.length > 0) {
-      // Process each business to decide: use cache or check via Mino
-      for (const business of businesses) {
-        // Step 1: Check if business exists in database
-        const cached = await getBusinessFromCache(business.place_id);
+    const stream = new ReadableStream({
+      async start(controller) {
+        const sendEvent = (event: string, payload: unknown) => {
+          controller.enqueue(
+            encoder.encode(
+              `event: ${event}\n` +
+                `data: ${JSON.stringify(payload)}\n\n`
+            )
+          );
+        };
 
-        if (cached) {
-          /**
-           * BUSINESS EXISTS IN DATABASE
-           * 
-           * Now we need to decide: use cache or re-check?
-           * 
-           * Decision criteria:
-           * - has_website must not be null (we must have checked it before)
-           * - last_checked_at must be less than 24 hours ago (data is fresh)
-           * 
-           * If both conditions are true → USE CACHE
-           * Otherwise → RE-CHECK via Mino API
-           */
-          const hasWebsiteValue = cached.has_website !== null;
-          const isFresh = isDataFresh(cached.last_checked_at, 24);
+        const heartbeat = setInterval(() => {
+          sendEvent("heartbeat", { ts: Date.now() });
+        }, 10000);
 
-          if (hasWebsiteValue && isFresh) {
-            /**
-             * USE CACHE
-             * 
-             * Conditions met:
-             * ✓ Business exists in database
-             * ✓ has_website is set (not null)
-             * ✓ last_checked_at is less than 24 hours ago
-             * 
-             * Action: Use cached value, skip Mino API call
-             * Benefit: Saves API costs and time
-             */
-            websiteResults.set(business.place_id, cached.has_website);
-          } else {
-            /**
-             * RE-CHECK VIA MINO API
-             * 
-             * Why re-check?
-             * - has_website is null (never checked before), OR
-             * - last_checked_at is more than 24 hours ago (data is stale)
-             * 
-             * Action: Add to checking list, will check via Mino API
-             * Result: Fresh data will be saved back to database
-             */
-            businessesToCheck.push({
-              place_id: business.place_id,
-              googleMapsUrl: buildGoogleMapsUrl(business.place_id),
-            });
-          }
-        } else {
-          /**
-           * BUSINESS NOT IN DATABASE
-           * 
-           * This is a new business we haven't seen before.
-           * 
-           * Action: Check via Mino API
-           * Result: Will be saved to database after checking
-           */
-          businessesToCheck.push({
-            place_id: business.place_id,
-            googleMapsUrl: buildGoogleMapsUrl(business.place_id),
+        const seenPlaceIds = new Set<string>();
+        let tilesSearched = 0;
+        let businessesFound = 0;
+        const startedAtMs = Date.now();
+
+        try {
+          sendEvent("metadata", {
+            businessTypes: extractedData.businessTypes,
+            location: extractedData.location,
+            radiusKm,
+            tileCount: tiles.length,
+            center,
+            mockUsed: usedGeminiMock,
+            geminiErrorMessage,
+            minoEnabled: !!minoApiKey,
           });
-        }
-      }
 
-      // Check websites in parallel for businesses that need checking
-      if (businessesToCheck.length > 0) {
-        /**
-         * PARALLEL WEBSITE CHECKING VIA MINO API
-         * 
-         * These businesses need checking because:
-         * - They don't exist in database, OR
-         * - They exist but data is stale (>24 hours old), OR
-         * - They exist but has_website is null (never checked)
-         * 
-         * checkBusinessesWebsitesParallel() checks multiple businesses at the same time
-         * This is much faster than checking them one by one
-         * 
-         * PROTECTION: Includes timeout protection
-         * - Each Mino API call has a timeout (15 seconds default)
-         * - Prevents hanging requests from blocking the response
-         * - Failed/timeout checks don't prevent successful checks
-         * 
-         * Example:
-         * - Sequential: Check 5 businesses = 5 × 3 seconds = 15 seconds
-         * - Parallel: Check 5 businesses = ~3 seconds (all at once)
-         * - With timeout: Slow request times out after 15s, others continue
-         */
-        const newWebsiteResults = await checkBusinessesWebsitesParallel(
-          businessesToCheck,
-          minoApiKey,
-          MINO_API_TIMEOUT_MS
-        );
+          for (const tile of tiles) {
+            if (request.signal.aborted) {
+              break;
+            }
 
-        /**
-         * SAVE RESULTS BACK TO SUPABASE
-         * 
-         * For each business we just checked:
-         * 1. Store the result (has_website: true/false)
-         * 2. Update database with:
-         *    - has_website: The result from Mino API
-         *    - last_checked_at: Current timestamp (marks data as fresh)
-         * 
-         * This ensures:
-         * - Next time we see this business, we'll use cache (if <24h old)
-         * - Database always has the latest checked timestamp
-         * - We can track when data was last verified
-         */
-        for (const [placeId, hasWebsite] of newWebsiteResults.entries()) {
-          // Store result for response
-          websiteResults.set(placeId, hasWebsite);
-
-          // Save result back to Supabase
-          try {
-            await updateBusiness(placeId, {
-              has_website: hasWebsite,
-              last_checked_at: new Date().toISOString(), // Mark as fresh
+            sendEvent("tile", {
+              id: tile.id,
+              bounds: tile.bounds,
             });
-          } catch (dbError) {
-            // Log error but don't fail the request
-            // The result is still returned to user, just not cached
-            console.error(
-              `Failed to update has_website for ${placeId}:`,
-              dbError
-            );
-          }
-        }
+            const tileBusinesses: BusinessResult[] = [];
+            for (const businessType of extractedData.businessTypes) {
+              const tileResults = await fetchBusinessesForTile(
+                businessType,
+                tile,
+                extractedData.location,
+                request.signal
+              );
+              tileBusinesses.push(...tileResults);
+            }
+
+            if (tileBusinesses.length === 0) {
+              const fallbackResults = await fetchBusinessesFromOverpass(
+                tile,
+                extractedData.businessTypes,
+                request.signal
+              );
+              tileBusinesses.push(...fallbackResults);
+            }
+
+            const uniqueTileBusinesses = tileBusinesses.filter((business) => {
+              if (seenPlaceIds.has(business.place_id)) {
+                return false;
+              }
+              seenPlaceIds.add(business.place_id);
+              return true;
+            });
+
+            await processWithConcurrency(
+              uniqueTileBusinesses,
+              WEBSITE_CHECK_CONCURRENCY,
+              async (business) => {
+                const hasWebsite = await resolveHasWebsite(
+                  business,
+                  minoApiKey
+                );
+
+                if (hasWebsite === false || hasWebsite === null) {
+                  businessesFound += 1;
+                  sendEvent("business", {
+                    ...business,
+                    has_website: hasWebsite,
+                    website_status:
+                      hasWebsite === false ? "no_website" : "unknown",
+                  });
+                }
       }
-    }
+            );
 
-    // Add has_website to each business result
-    const businessesWithWebsite = businesses.map((business) => ({
-      ...business,
-      has_website: websiteResults.get(business.place_id) ?? null,
-    }));
+            tilesSearched += 1;
+            sendEvent("progress", {
+              tilesSearched,
+              totalTiles: tiles.length,
+              businessesFound,
+              uniqueBusinesses: seenPlaceIds.size,
+              elapsedMs: Date.now() - startedAtMs,
+            });
+          }
 
-    /**
-     * FORMAT FINAL API RESPONSE
-     * 
-     * Calculate statistics and format response for frontend:
-     * 1. Total businesses found
-     * 2. Count of businesses without website
-     * 3. List of businesses without website (name + address only)
-     */
-    const totalBusinesses = businessesWithWebsite.length;
-
-    // Filter businesses that don't have a website
-    // has_website === false means we checked and confirmed no website
-    // has_website === null means we haven't checked yet (exclude from count)
-    const businessesWithoutWebsite = businessesWithWebsite.filter(
-      (business) => business.has_website === false
-    );
-
-    const countWithoutWebsite = businessesWithoutWebsite.length;
-
-    // Format list of businesses without website (only name and address)
-    const businessesWithoutWebsiteList = businessesWithoutWebsite.map(
-      (business) => ({
-        name: business.name,
-        address: business.address,
-      })
-    );
-
-    /**
-     * FINAL RESPONSE STRUCTURE
-     * 
-     * Clean JSON format for frontend consumption:
-     * - summary: Statistics about the search results
-     * - businesses: Full list of all businesses (for reference)
-     * - businessesWithoutWebsite: Filtered list (name + address only)
-     * - metadata: Additional info about the request
-     */
-    return NextResponse.json({
-      success: true,
-      summary: {
-        totalBusinesses: totalBusinesses,
-        countWithoutWebsite: countWithoutWebsite,
+          sendEvent("done", {
+            totalFound: businessesFound,
+            tilesSearched,
+            totalTiles: tiles.length,
+            uniqueBusinesses: seenPlaceIds.size,
+            elapsedMs: Date.now() - startedAtMs,
+          });
+        } catch (error) {
+          console.error("Streaming error:", error);
+          sendEvent("error", {
+            message:
+              error instanceof Error
+                ? error.message
+                : "Unexpected error while streaming results.",
+          });
+        } finally {
+          clearInterval(heartbeat);
+          controller.close();
+        }
       },
-      businessesWithoutWebsite: businessesWithoutWebsiteList,
-      allBusinesses: businessesWithWebsite, // Full list for reference
-      metadata: {
-        businessTypes: extractedData.businessTypes,
-        location: extractedData.location,
-        originalPrompt: prompt,
-        timestamp: new Date().toISOString(),
+    });
+
+    return new NextResponse(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
       },
     });
   } catch (error) {
-    // Handle any errors that occur
     console.error("API Error:", error);
 
-    // Return a more specific error message if possible
     const errorMessage =
       error instanceof Error ? error.message : "Unknown error occurred";
 
@@ -844,7 +1000,7 @@ Only return the JSON object, no additional text or explanation.
         error: "Internal server error",
         message: errorMessage,
       },
-      { status: 500 } // 500 = Internal Server Error
+      { status: 500 }
     );
   }
 }
