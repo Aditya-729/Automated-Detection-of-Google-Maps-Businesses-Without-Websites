@@ -2,7 +2,7 @@
 
 A simple Next.js application using the App Router with Gemini AI integration.
 
-**Live link:** https://website-gap-finder.vercel.app
+**Live link:** https://website-gap-finder-v2.vercel.app
 
 ## Getting Started
 
