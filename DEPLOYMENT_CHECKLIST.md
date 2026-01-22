@@ -19,7 +19,6 @@
 Set these in Vercel dashboard before deploying:
 
 - [ ] `GEMINI_API_KEY` - Gemini AI API key
-- [ ] `GOOGLE_MAPS_API_KEY` - Google Maps API key (optional; only needed for business search)
 - [ ] `MINO_API_KEY` - Mino API key
 - [ ] `NEXT_PUBLIC_SUPABASE_URL` - Supabase project URL
 - [ ] `NEXT_PUBLIC_SUPABASE_ANON_KEY` - Supabase anon key

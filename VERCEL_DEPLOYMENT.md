@@ -22,15 +22,7 @@ GEMINI_API_KEY=your_gemini_api_key_here
 - **Why needed**: Extracts business types and location from user prompts
 - **Server-only**: Only used in API routes (not exposed to browser)
 
-### 2. Google Maps API Key (optional)
-```
-GOOGLE_MAPS_API_KEY=your_google_maps_api_key_here
-```
-- **Where to get it**: https://console.cloud.google.com/google/maps-apis
-- **Why needed**: Searches for businesses using Google Places API (only if you want business search)
-- **Server-only**: Only used in API routes (not exposed to browser)
-
-### 3. Mino API Key
+### 2. Mino API Key
 ```
 MINO_API_KEY=your_mino_api_key_here
 ```
@@ -38,7 +30,7 @@ MINO_API_KEY=your_mino_api_key_here
 - **Why needed**: Checks if businesses have websites using browser automation
 - **Server-only**: Only used in API routes (not exposed to browser)
 
-### 4. Supabase URL
+### 3. Supabase URL
 ```
 NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
 ```
@@ -46,7 +38,7 @@ NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
 - **Why needed**: Connects to Supabase database for caching
 - **Public**: Available in browser (NEXT_PUBLIC_ prefix)
 
-### 5. Supabase Anon Key
+### 4. Supabase Anon Key
 ```
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
 ```

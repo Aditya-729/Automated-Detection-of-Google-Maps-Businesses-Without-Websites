@@ -17,7 +17,7 @@ Limits the number of businesses processed in a single request to `MAX_BUSINESSES
 
 **Cost Control:**
 - Each business requires multiple API calls:
-  - Google Places API (search)
+  - OpenStreetMap (search)
   - Mino API (website check)
   - Database operations
 - Processing 100 businesses = 100+ API calls = high cost
@@ -43,7 +43,7 @@ if (businesses.length > MAX_BUSINESSES_LIMIT) {
 
 ### Example
 - User searches: "restaurants in New York"
-- Google Places returns: 50 restaurants
+- OpenStreetMap returns: 50 restaurants
 - System processes: First 20 restaurants
 - Result: User gets 20 results quickly instead of waiting for all 50
 
@@ -52,7 +52,7 @@ if (businesses.length > MAX_BUSINESSES_LIMIT) {
 ## 2. Graceful API Error Handling
 
 ### What It Does
-Catches and handles errors from all API calls (Gemini, Google Places, Mino) without crashing the entire request.
+Catches and handles errors from all API calls (Gemini, OpenStreetMap, Mino) without crashing the entire request.
 
 ### Why This Protection Exists
 
@@ -77,7 +77,7 @@ Catches and handles errors from all API calls (Gemini, Google Places, Mino) with
 
 ### How It Works
 
-**Google Places API:**
+**OpenStreetMap API:**
 ```typescript
 try {
   const response = await fetch(apiUrl);
@@ -116,8 +116,8 @@ try {
 
 ### Example
 - User searches: "coffee shops and restaurants in New York"
-- Google Places search for "coffee shops" succeeds → 10 results
-- Google Places search for "restaurants" fails (rate limit) → 0 results
+- OpenStreetMap search for "coffee shops" succeeds → 10 results
+- OpenStreetMap search for "restaurants" fails (rate limit) → 0 results
 - Result: User still gets 10 coffee shops (partial success)
 
 ---

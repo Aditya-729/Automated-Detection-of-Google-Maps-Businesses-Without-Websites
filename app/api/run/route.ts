@@ -22,6 +22,13 @@ import {
   BusinessRecord,
 } from "@/lib/db-businesses";
 import { buildGoogleMapsSearchUrl, checkBusinessWebsite } from "@/lib/mino-api";
+import {
+  searchGooglePlacesNearby,
+  findGooglePlaceId,
+  getGooglePlaceWebsite,
+} from "@/lib/google-places";
+import type { GooglePlaceSummary } from "@/lib/google-places";
+import { searchPhotonPlaces } from "@/lib/photon-api";
 
 /**
  * Gemini toggle
@@ -48,6 +55,10 @@ const NOMINATIM_RATE_LIMIT_MS = Number(
 const TILE_SIZE_KM = Number(process.env.TILE_SIZE_KM || 6);
 const TILE_OVERLAP_KM = Number(process.env.TILE_OVERLAP_KM || 1.5);
 const MAX_PAGE_SIZE = 50;
+const MAX_TILES_PER_REQUEST = Math.max(
+  5,
+  Number(process.env.MAX_TILES_PER_REQUEST || 40)
+);
 const WEBSITE_CHECK_CONCURRENCY = Math.max(
   1,
   Number(process.env.WEBSITE_CHECK_CONCURRENCY || 4)
@@ -64,6 +75,14 @@ const OVERPASS_RATE_LIMIT_MS = Math.max(
   500,
   Number(process.env.OVERPASS_RATE_LIMIT_MS || 1100)
 );
+const PHOTON_RATE_LIMIT_MS = Math.max(
+  500,
+  Number(process.env.PHOTON_RATE_LIMIT_MS || 1100)
+);
+const PHOTON_MAX_RESULTS = Math.max(
+  20,
+  Number(process.env.PHOTON_MAX_RESULTS || 80)
+);
 const DEFAULT_RADIUS_KM = 50;
 const MIN_RADIUS_KM = 10;
 const MAX_RADIUS_KM = 1000;
@@ -75,6 +94,8 @@ interface BusinessResult {
   lat: number | null;
   lon: number | null;
   website?: string | null;
+  source?: "osm" | "google";
+  google_place_id?: string | null;
 }
 
 interface GeoPoint {
@@ -377,6 +398,8 @@ function normalizeBusiness(place: {
     lat: Number.isNaN(lat) ? null : lat,
     lon: Number.isNaN(lon) ? null : lon,
     website,
+    source: "osm" as const,
+    google_place_id: null,
   };
 }
 
@@ -519,6 +542,8 @@ function normalizeOverpassBusiness(element: {
     lat,
     lon,
     website,
+    source: "osm" as const,
+    google_place_id: null,
   };
 }
 
@@ -535,6 +560,112 @@ async function fetchBusinessesFromOverpass(
     const business = normalizeOverpassBusiness(element);
     if (business?.place_id) {
       results.push(business);
+    }
+  }
+
+  return results;
+}
+
+const GOOGLE_PLACES_TYPE_MAP: Record<
+  string,
+  { type?: string; keyword?: string }
+> = {
+  restaurant: { type: "restaurant" },
+  cafe: { type: "cafe" },
+  "coffee shop": { type: "cafe", keyword: "coffee shop" },
+  gym: { type: "gym" },
+  salon: { keyword: "salon" },
+  barber: { keyword: "barber" },
+  spa: { type: "spa" },
+  hotel: { type: "lodging" },
+  clinic: { keyword: "clinic" },
+  dentist: { type: "dentist" },
+  "grocery store": { type: "supermarket" },
+  business: { keyword: "business" },
+};
+
+function normalizeGooglePlace(place: GooglePlaceSummary): BusinessResult {
+  return {
+    place_id: `gplaces:${place.place_id}`,
+    google_place_id: place.place_id,
+    name: place.name,
+    address: place.address,
+    lat: place.lat,
+    lon: place.lon,
+    website: null,
+    source: "google" as const,
+  };
+}
+
+async function fetchBusinessesFromGooglePlaces(
+  tile: GeoTile,
+  businessTypes: string[],
+  apiKey: string,
+  signal?: AbortSignal
+): Promise<BusinessResult[]> {
+  if (signal?.aborted) {
+    return [];
+  }
+
+  const centerLat = (tile.bounds.north + tile.bounds.south) / 2;
+  const centerLon = (tile.bounds.east + tile.bounds.west) / 2;
+  const latRadius = Math.abs(tile.bounds.north - tile.bounds.south) / 2;
+  const lonRadius = Math.abs(tile.bounds.east - tile.bounds.west) / 2;
+  const approxKm =
+    Math.max(latRadius * 111.32, lonRadius * 111.32 * Math.cos((centerLat * Math.PI) / 180));
+  const radiusMeters = Math.max(500, Math.min(50000, Math.round(approxKm * 1000)));
+
+  const results: BusinessResult[] = [];
+  const normalizedTypes = businessTypes.map((type) => type.toLowerCase().trim());
+  const typesToQuery = normalizedTypes.length > 0 ? normalizedTypes : ["business"];
+
+  for (const type of typesToQuery) {
+    const mapEntry = GOOGLE_PLACES_TYPE_MAP[type] || { keyword: type };
+    const places = await searchGooglePlacesNearby({
+      apiKey,
+      location: { lat: centerLat, lon: centerLon },
+      radiusMeters,
+      keyword: mapEntry.keyword,
+      type: mapEntry.type,
+    });
+
+    for (const place of places) {
+      results.push(normalizeGooglePlace(place));
+    }
+  }
+
+  return results;
+}
+
+async function fetchBusinessesFromPhoton(
+  tile: GeoTile,
+  businessTypes: string[],
+  signal?: AbortSignal
+): Promise<BusinessResult[]> {
+  const results: BusinessResult[] = [];
+  const normalizedTypes = businessTypes.map((type) => type.toLowerCase().trim());
+  const queries = normalizedTypes.length > 0 ? normalizedTypes : ["business"];
+
+  for (const query of queries) {
+    const places = await searchPhotonPlaces({
+      query,
+      bounds: tile.bounds,
+      limit: PHOTON_MAX_RESULTS,
+      rateLimitMs: PHOTON_RATE_LIMIT_MS,
+      signal,
+    });
+
+    for (const place of places) {
+      results.push({
+        place_id: `osm:${place.osm_type}:${place.osm_id}`,
+        name: place.name,
+        address: place.address,
+        lat: place.lat,
+        lon: place.lon,
+        website: null,
+        source: "osm" as const,
+        google_place_id: null,
+      });
     }
   }
 
@@ -592,7 +723,8 @@ async function fetchBusinessesForTile(
 
 async function resolveHasWebsite(
   business: BusinessResult,
-  minoApiKey: string | undefined
+  minoApiKey: string | undefined,
+  googleApiKey: string | undefined
 ): Promise<boolean | null> {
   const cached = await getBusinessFromCache(business.place_id);
 
@@ -610,6 +742,34 @@ async function resolveHasWebsite(
       console.error(`Failed to update has_website for ${business.place_id}:`, error);
     }
     return true;
+  }
+
+  if (googleApiKey) {
+    let placeId = business.google_place_id;
+    if (!placeId) {
+      placeId = await findGooglePlaceId(
+        `${business.name} ${business.address}`,
+        googleApiKey
+      );
+    }
+    if (placeId) {
+      const website = await getGooglePlaceWebsite(placeId, googleApiKey);
+      if (website !== null) {
+        const hasWebsite = website.trim().length > 0;
+        try {
+          await updateBusiness(business.place_id, {
+            has_website: hasWebsite,
+            last_checked_at: new Date().toISOString(),
+          });
+        } catch (error) {
+          console.error(
+            `Failed to update has_website for ${business.place_id}:`,
+            error
+          );
+        }
+        return hasWebsite;
+      }
+    }
   }
 
   if (!cached) {
@@ -684,7 +844,7 @@ async function processWithConcurrency<T>(
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { prompt, radiusKm: radiusKmRaw } = body;
+    const { prompt, radiusKm: radiusKmRaw, startTileIndex } = body;
 
     if (!prompt || typeof prompt !== "string") {
       return NextResponse.json(
@@ -857,7 +1017,14 @@ Only return the JSON object, no additional text or explanation.
       TILE_SIZE_KM,
       TILE_OVERLAP_KM
     );
+    const normalizedStart = Number.isFinite(Number(startTileIndex))
+      ? Math.max(0, Math.floor(Number(startTileIndex)))
+      : 0;
+    const startIndex = Math.min(normalizedStart, Math.max(tiles.length - 1, 0));
+    const endIndex = Math.min(startIndex + MAX_TILES_PER_REQUEST, tiles.length);
+    const tilesBatch = tiles.slice(startIndex, endIndex);
     const minoApiKey = process.env.MINO_API_KEY;
+    const googleApiKey = process.env.GOOGLE_PLACES_API_KEY;
     const encoder = new TextEncoder();
 
     const stream = new ReadableStream({
@@ -886,13 +1053,26 @@ Only return the JSON object, no additional text or explanation.
             location: extractedData.location,
             radiusKm,
             tileCount: tiles.length,
+            startTileIndex: startIndex,
+            batchTileCount: tilesBatch.length,
+            maxTilesPerRequest: MAX_TILES_PER_REQUEST,
             center,
             mockUsed: usedGeminiMock,
             geminiErrorMessage,
             minoEnabled: !!minoApiKey,
+            googlePlacesEnabled: !!googleApiKey,
+            photonEnabled: true,
           });
 
-          for (const tile of tiles) {
+          if (!minoApiKey && !googleApiKey) {
+            sendEvent("error", {
+              message:
+                "MINO_API_KEY or GOOGLE_PLACES_API_KEY is required to verify websites. Add one to Vercel env vars and redeploy.",
+            });
+            return;
+          }
+
+          for (const tile of tilesBatch) {
             if (request.signal.aborted) {
               break;
             }
@@ -912,13 +1092,28 @@ Only return the JSON object, no additional text or explanation.
               tileBusinesses.push(...tileResults);
             }
 
-            if (tileBusinesses.length === 0) {
-              const fallbackResults = await fetchBusinessesFromOverpass(
+            const fallbackResults = await fetchBusinessesFromOverpass(
+              tile,
+              extractedData.businessTypes,
+              request.signal
+            );
+            tileBusinesses.push(...fallbackResults);
+
+            const photonResults = await fetchBusinessesFromPhoton(
+              tile,
+              extractedData.businessTypes,
+              request.signal
+            );
+            tileBusinesses.push(...photonResults);
+
+            if (googleApiKey) {
+              const googleResults = await fetchBusinessesFromGooglePlaces(
                 tile,
                 extractedData.businessTypes,
+                googleApiKey,
                 request.signal
               );
-              tileBusinesses.push(...fallbackResults);
+              tileBusinesses.push(...googleResults);
             }
 
             const uniqueTileBusinesses = tileBusinesses.filter((business) => {
@@ -935,16 +1130,16 @@ Only return the JSON object, no additional text or explanation.
               async (business) => {
                 const hasWebsite = await resolveHasWebsite(
                   business,
-                  minoApiKey
+                  minoApiKey,
+                  googleApiKey
                 );
 
-                if (hasWebsite === false || hasWebsite === null) {
+                if (hasWebsite === false) {
                   businessesFound += 1;
                   sendEvent("business", {
                     ...business,
                     has_website: hasWebsite,
-                    website_status:
-                      hasWebsite === false ? "no_website" : "unknown",
+                    website_status: "no_website",
                   });
                 }
       }
@@ -952,7 +1147,7 @@ Only return the JSON object, no additional text or explanation.
 
             tilesSearched += 1;
             sendEvent("progress", {
-              tilesSearched,
+              tilesSearched: startIndex + tilesSearched,
               totalTiles: tiles.length,
               businessesFound,
               uniqueBusinesses: seenPlaceIds.size,
@@ -960,12 +1155,15 @@ Only return the JSON object, no additional text or explanation.
             });
           }
 
+          const nextTileIndex = endIndex < tiles.length ? endIndex : null;
           sendEvent("done", {
             totalFound: businessesFound,
-            tilesSearched,
+            tilesSearched: startIndex + tilesSearched,
             totalTiles: tiles.length,
             uniqueBusinesses: seenPlaceIds.size,
             elapsedMs: Date.now() - startedAtMs,
+            hasMore: endIndex < tiles.length,
+            nextTileIndex,
           });
         } catch (error) {
           console.error("Streaming error:", error);

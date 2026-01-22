@@ -26,7 +26,7 @@ Our `businesses` table is like a spreadsheet with these columns:
 ### 2. Unique Constraint (place_id)
 - `place_id` is marked as UNIQUE
 - This means no two businesses can have the same place_id
-- This is how we identify businesses from Google Places API
+- This is how we identify businesses from OpenStreetMap
 
 ### 3. NULL Values
 - NULL means "no value" or "not set yet"
@@ -43,7 +43,7 @@ Our `businesses` table is like a spreadsheet with these columns:
 ### Scenario 1: First Time Searching
 1. User searches: "coffee shops in New York"
 2. System checks database: No results found
-3. Calls Google Places API: Gets list of coffee shops
+3. Calls OpenStreetMap: Gets list of coffee shops
 4. Saves to database: Stores each business
 5. Returns results to user
 
@@ -88,7 +88,7 @@ WHERE place_id = 'ChIJ...'
 ## Why Use a Cache?
 
 1. **Speed**: Database lookups are faster than API calls
-2. **Cost**: Google Places API charges per request - cache reduces calls
+2. **Cost**: Business search APIs can charge per request - cache reduces calls
 3. **Reliability**: If API is down, we can still serve cached data
 4. **Rate Limits**: APIs have limits - caching helps stay under limits
 

@@ -1,6 +1,8 @@
-# Next.js App with TypeScript
+# Website Gap Finder
 
 A simple Next.js application using the App Router with Gemini AI integration.
+
+**Live link:** https://website-gap-finder.vercel.app
 
 ## Getting Started
 
@@ -39,10 +41,10 @@ Create a `.env.local` file in the root directory and add your API keys:
 # Gemini AI API
 GEMINI_API_KEY=your_gemini_api_key_here
 
-# Google Maps API (optional)
-# Only needed if you want the app to search businesses via Google Places.
-# If you don't set this, the app will return 0 businesses (but it will still run).
-GOOGLE_MAPS_API_KEY=your_google_maps_api_key_here
+#
+# NOTE:
+# Google Maps API is NOT required because we now use OpenStreetMap (Nominatim).
+# You can leave this out completely.
 
 # Mino API (for website checking)
 MINO_API_KEY=your_mino_api_key_here
@@ -54,9 +56,9 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
 
 **Get your API keys from:**
 - Gemini API: https://makersuite.google.com/app/apikey
-- Google Maps API: https://console.cloud.google.com/google/maps-apis
 - Mino API: https://mino.ai (for browser automation and website checking)
 - Supabase: Your project dashboard (Settings → API)
+- OpenStreetMap: no API key required
 
 **⚠️ Important:** The `.env.local` file is gitignored and will NOT be committed to GitHub. Your API keys stay secure!
 
@@ -72,7 +74,7 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 - **Prompt Input**: Enter text describing businesses and locations
 - **AI Extraction**: Uses Gemini AI to extract business types and location information
-- **Business Search**: Uses Google Places API to find actual businesses
+- **Business Search**: Uses OpenStreetMap (Nominatim) to find businesses (no API key)
 - **Website Checking**: Uses Mino API with parallel browser agents to check if businesses have websites
 - **Database Caching**: Stores businesses in Supabase to reduce API calls and improve speed
 - **Structured Response**: Returns clean JSON with business details (name, address, place_id, has_website)
@@ -116,13 +118,13 @@ The app automatically checks if businesses have websites using Mino API:
 
 ## API Endpoint
 
-- `POST /api/run` - Processes user prompt, extracts business types and location, searches for businesses using Google Places API, and checks if they have websites using Mino API
+- `POST /api/run` - Processes user prompt, extracts business types and location, searches businesses using OpenStreetMap, and checks if they have websites using Mino API
 
 ## Database Structure
 
 The `businesses` table stores:
 - `name`: Business name
-- `place_id`: Unique identifier from Google Places (used to identify businesses)
+- `place_id`: Unique identifier from OpenStreetMap (used to identify businesses)
 - `has_website`: Whether business has a website (can be null if not checked)
 - `last_checked_at`: Timestamp of last update
 - `created_at`: When record was first created
@@ -133,6 +135,6 @@ The `businesses` table stores:
 - [Next.js Documentation](https://nextjs.org/docs)
 - [TypeScript Documentation](https://www.typescriptlang.org/docs)
 - [Google Gemini API](https://ai.google.dev/)
-- [Google Places API](https://developers.google.com/maps/documentation/places/web-service)
+- [OpenStreetMap Nominatim](https://nominatim.org/release-docs/latest/api/Search/)
 - [Mino API Documentation](https://docs.mino.ai)
 - [Supabase Documentation](https://supabase.com/docs)

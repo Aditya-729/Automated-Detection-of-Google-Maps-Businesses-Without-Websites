@@ -6,12 +6,11 @@
 
 **Location**: `.env.local` (in project root)
 
-**Contains all 5 environment variables:**
+**Contains all required environment variables:**
 1. `MINO_API_KEY` - your_mino_api_key_here (DO NOT paste real keys into docs)
 2. `GEMINI_API_KEY` - your_gemini_api_key_here (DO NOT paste real keys into docs)
-3. `GOOGLE_MAPS_API_KEY` - your_google_maps_api_key_here (optional if you are not using Google business search)
-4. `NEXT_PUBLIC_SUPABASE_URL` - your_supabase_project_url_here
-5. `NEXT_PUBLIC_SUPABASE_ANON_KEY` - your_supabase_anon_key_here
+3. `NEXT_PUBLIC_SUPABASE_URL` - your_supabase_project_url_here
+4. `NEXT_PUBLIC_SUPABASE_ANON_KEY` - your_supabase_anon_key_here
 
 **Important Notes:**
 - ✅ File is properly gitignored (won't be committed to GitHub)
@@ -22,11 +21,10 @@
 ### 2. Verified Code Uses Environment Variables
 
 **All code already uses `process.env` variables:**
-- ✅ `app/api/run/route.ts` line 425: `process.env.GEMINI_API_KEY`
-- ✅ `app/api/run/route.ts` line 568: `process.env.GOOGLE_MAPS_API_KEY`
-- ✅ `app/api/run/route.ts` line 638: `process.env.MINO_API_KEY`
-- ✅ `lib/supabase.ts` line 30: `process.env.NEXT_PUBLIC_SUPABASE_URL`
-- ✅ `lib/supabase.ts` line 31: `process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- ✅ `app/api/run/route.ts`: `process.env.GEMINI_API_KEY`
+- ✅ `app/api/run/route.ts`: `process.env.MINO_API_KEY`
+- ✅ `lib/supabase.ts`: `process.env.NEXT_PUBLIC_SUPABASE_URL`
+- ✅ `lib/supabase.ts`: `process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY`
 
 **No hardcoded keys found!** ✅
 
@@ -42,7 +40,6 @@
 ### ✅ Secure (Server-Side Only):
 - `MINO_API_KEY` - Only accessible in API routes
 - `GEMINI_API_KEY` - Only accessible in API routes
-- `GOOGLE_MAPS_API_KEY` - Only accessible in API routes (optional if you are not using Google business search)
 
 ### ✅ Safe to Expose (Browser Accessible):
 - `NEXT_PUBLIC_SUPABASE_URL` - Just a URL, not a secret
@@ -62,15 +59,14 @@ Open `.env.local` and replace these placeholders with your actual keys:
 
 ```
 GEMINI_API_KEY=<YOUR_GEMINI_KEY>          → Replace with your actual Gemini key
-GOOGLE_MAPS_API_KEY=<YOUR_GOOGLE_MAPS_KEY> → Optional. Only needed if you enable business search via Google Places.
 NEXT_PUBLIC_SUPABASE_URL=<YOUR_SUPABASE_URL> → Replace with your Supabase project URL
 NEXT_PUBLIC_SUPABASE_ANON_KEY=<YOUR_SUPABASE_ANON_KEY> → Replace with your Supabase anon key
 ```
 
 **Where to get your keys:**
 - **Gemini**: https://makersuite.google.com/app/apikey
-- **Google Maps**: https://console.cloud.google.com/google/maps-apis
 - **Supabase**: Supabase Dashboard → Settings → API
+- **OpenStreetMap**: no API key required
 
 ### Step 2: Test Locally
 
@@ -88,7 +84,6 @@ The app should now use all your API keys from `.env.local`!
 4. Add environment variables:
    - `MINO_API_KEY` = (your Mino key - for website checking)
    - `GEMINI_API_KEY` = (your Gemini key - for AI extraction)
-   - `GOOGLE_MAPS_API_KEY` = (optional - only if you want business search via Google Places)
    - `NEXT_PUBLIC_SUPABASE_URL` = (your Supabase URL - for database caching)
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY` = (your Supabase anon key - for database caching)
 5. Redeploy your app

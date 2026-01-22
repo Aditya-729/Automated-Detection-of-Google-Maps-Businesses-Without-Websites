@@ -9,12 +9,14 @@
  * - app/blog/[id]/page.tsx → /blog/123 (dynamic)
  */
 
+import Link from "next/link";
+
 export default function About() {
   return (
     <main>
       <h1>About Page</h1>
       <p>This is the about page at /about</p>
-      <a href="/">← Back to home</a>
+      <Link href="/">← Back to home</Link>
     </main>
   );
 }

@@ -99,7 +99,7 @@
 - **Format**: Full business objects with all fields:
   - `name`: Business name
   - `address`: Full address
-  - `place_id`: Google Places ID
+  - `place_id`: OpenStreetMap ID
   - `has_website`: `true`, `false`, or `null`
 
 ### `metadata`

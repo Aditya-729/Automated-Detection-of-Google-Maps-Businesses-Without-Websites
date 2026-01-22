@@ -34,6 +34,9 @@ interface StreamMetadata {
   location: string | null;
   radiusKm: number;
   tileCount: number;
+  startTileIndex?: number;
+  batchTileCount?: number;
+  maxTilesPerRequest?: number;
   center: {
     lat: number;
     lon: number;
@@ -41,6 +44,8 @@ interface StreamMetadata {
   mockUsed?: boolean;
   geminiErrorMessage?: string | null;
   minoEnabled?: boolean;
+  googlePlacesEnabled?: boolean;
+  photonEnabled?: boolean;
 }
 
 interface StreamProgress {
@@ -96,6 +101,7 @@ export default function Home() {
   const [isCheckingGemini, setIsCheckingGemini] = useState(false);
   const streamControllerRef = useRef<AbortController | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  const businessIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const target = loadMoreRef.current;
@@ -133,22 +139,31 @@ export default function Home() {
    * - Parses SSE events and updates the UI incrementally
    * - Shows errors without blocking partial results
    */
-  const handleRun = async () => {
+  const runSearchBatch = async (
+    startTileIndex: number,
+    isContinuation: boolean
+  ) => {
     streamControllerRef.current?.abort();
     const controller = new AbortController();
     streamControllerRef.current = controller;
 
-    setIsStreaming(true);
-    setHasSearched(true);
-    setBusinesses([]);
-    setMetadata(null);
-    setProgress(null);
-    setTiles([]);
-    setError(null);
-    setVisibleCount(RESULTS_PAGE_SIZE);
-    setStartTime(Date.now());
-    setNowTick(Date.now());
-    setToasts([]);
+    if (!isContinuation) {
+      setIsStreaming(true);
+      setHasSearched(true);
+      setBusinesses([]);
+      setMetadata(null);
+      setProgress(null);
+      setTiles([]);
+      setError(null);
+      setVisibleCount(RESULTS_PAGE_SIZE);
+      setStartTime(Date.now());
+      setNowTick(Date.now());
+      setToasts([]);
+      businessIdsRef.current = new Set();
+    }
+
+    let receivedDone = false;
+    let nextTileIndex: number | null = null;
 
     try {
       const response = await fetch("/api/run", {
@@ -157,7 +172,7 @@ export default function Home() {
           "Content-Type": "application/json",
           Accept: "text/event-stream",
         },
-        body: JSON.stringify({ prompt, radiusKm }),
+        body: JSON.stringify({ prompt, radiusKm, startTileIndex }),
         signal: controller.signal,
       });
 
@@ -233,6 +248,10 @@ export default function Home() {
           }
 
           if (eventType === "business") {
+            if (businessIdsRef.current.has(parsed.place_id)) {
+              continue;
+            }
+            businessIdsRef.current.add(parsed.place_id);
             setBusinesses((current) => [...current, parsed]);
             const toastId = `${parsed.place_id}-${Date.now()}`;
             setToasts((current) => [
@@ -256,6 +275,11 @@ export default function Home() {
           }
 
           if (eventType === "done") {
+            receivedDone = true;
+            nextTileIndex =
+              typeof parsed.nextTileIndex === "number"
+                ? parsed.nextTileIndex
+                : null;
             setProgress((current) => ({
               tilesSearched: parsed.tilesSearched ?? current?.tilesSearched ?? 0,
               totalTiles: parsed.totalTiles ?? current?.totalTiles ?? 0,
@@ -278,8 +302,19 @@ export default function Home() {
           : "Unknown error occurred. Please try again.";
       setError(errorMessage);
     } finally {
-      setIsStreaming(false);
+      if (controller.signal.aborted) {
+        return;
+      }
+      if (receivedDone && nextTileIndex !== null) {
+        await runSearchBatch(nextTileIndex, true);
+      } else {
+        setIsStreaming(false);
+      }
     }
+  };
+
+  const handleRun = async () => {
+    await runSearchBatch(0, false);
   };
 
   const handleGeminiCheck = async () => {
@@ -369,6 +404,12 @@ export default function Home() {
           <span className="status-pill">Supabase Cache: On</span>
           <span className="status-pill">
             Mino Check: {metadata?.minoEnabled === false ? "Off" : "On"}
+          </span>
+          <span className="status-pill">
+            Google Places: {metadata?.googlePlacesEnabled ? "On" : "Off"}
+          </span>
+          <span className="status-pill">
+            Photon: {metadata?.photonEnabled ? "On" : "Off"}
           </span>
         </div>
         <div className="status-list status-actions">
