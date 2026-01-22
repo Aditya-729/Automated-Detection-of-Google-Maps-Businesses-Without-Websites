@@ -26,7 +26,7 @@ interface BusinessWithoutWebsite {
   lat: number | null;
   lon: number | null;
   has_website?: boolean | null;
-  website_status?: "has_website" | "no_website" | "unknown";
+  website_status?: "no_website";
 }
 
 interface StreamMetadata {
@@ -597,13 +597,15 @@ export default function Home() {
             </div>
 
             <div className="table-container">
-              <h3>Businesses</h3>
+              <h3>Businesses Without Websites</h3>
               <table className="businesses-table">
                 <thead>
                   <tr>
                     <th>Name</th>
                     <th>Address</th>
-                    <th>Website status</th>
+                    <th>Latitude</th>
+                    <th>Longitude</th>
+                    <th>Status</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -611,12 +613,20 @@ export default function Home() {
                     <tr key={business.place_id}>
                       <td className="business-name">{business.name}</td>
                       <td className="business-address">{business.address}</td>
+                      <td>
+                        {Number.isFinite(business.lat)
+                          ? business.lat?.toFixed(6)
+                          : "—"}
+                      </td>
+                      <td>
+                        {Number.isFinite(business.lon)
+                          ? business.lon?.toFixed(6)
+                          : "—"}
+                      </td>
                       <td className="business-status">
-                        {business.website_status === "has_website"
-                          ? "Has website"
-                          : business.website_status === "no_website"
+                        {business.website_status === "no_website"
                           ? "No website"
-                          : "Needs check"}
+                          : "No website"}
                       </td>
                     </tr>
                   ))}
@@ -644,7 +654,7 @@ export default function Home() {
           <div className="empty-state">
             <p>
               {hasSearched
-                ? "No businesses were returned yet. Try a larger radius or a different query."
+                ? "No businesses without websites were found for this radius."
                 : "No results yet. Enter a prompt and click Run."}
             </p>
           </div>

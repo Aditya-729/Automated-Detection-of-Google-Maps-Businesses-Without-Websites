@@ -1140,19 +1140,14 @@ Only return the JSON object, no additional text or explanation.
                   googleApiKey
                 );
 
-                const websiteStatus =
-                  hasWebsite === true
-                    ? "has_website"
-                    : hasWebsite === false
-                    ? "no_website"
-                    : "unknown";
-
-                businessesFound += 1;
-                sendEvent("business", {
-                  ...business,
-                  has_website: hasWebsite,
-                  website_status: websiteStatus,
-                });
+                if (hasWebsite === false) {
+                  businessesFound += 1;
+                  sendEvent("business", {
+                    ...business,
+                    has_website: false,
+                    website_status: "no_website",
+                  });
+                }
       }
             );
 
