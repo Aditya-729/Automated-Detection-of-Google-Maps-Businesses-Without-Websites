@@ -755,19 +755,25 @@ async function resolveHasWebsite(
     if (placeId) {
       const website = await getGooglePlaceWebsite(placeId, googleApiKey);
       if (website !== null) {
-        const hasWebsite = website.trim().length > 0;
-        try {
-          await updateBusiness(business.place_id, {
-            has_website: hasWebsite,
-            last_checked_at: new Date().toISOString(),
-          });
-        } catch (error) {
-          console.error(
-            `Failed to update has_website for ${business.place_id}:`,
-            error
-          );
+        const trimmedWebsite = website.trim();
+        if (trimmedWebsite.length > 0) {
+          try {
+            await updateBusiness(business.place_id, {
+              has_website: true,
+              last_checked_at: new Date().toISOString(),
+            });
+          } catch (error) {
+            console.error(
+              `Failed to update has_website for ${business.place_id}:`,
+              error
+            );
+          }
+          return true;
         }
-        return hasWebsite;
+        // Google Places returned an empty website; treat as unknown and fallback to Mino.
+        console.info(
+          `Google Places returned empty website for ${business.place_id}; falling back to Mino.`
+        );
       }
     }
   }
